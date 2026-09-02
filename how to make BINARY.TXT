@@ -1,0 +1,36 @@
+1. Linux Binary Build Karne Ke Liye (WSL Use Karein)
+Linux ke liye hum Fully Static build karenge taaki wo kisi bhi Linux system par chale (bin GLIBC error ke).
+Commands:
+Shell Script
+# 1. Build directory mein jayein (ya naya banayein)
+mkdir -p build_linux
+cd build_linux
+
+# 2. CMake se static configuration karein
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static"
+
+# 3. Build start karein
+cmake --build . --parallel
+Binary path: build_linux/upx
+2. Windows Binary Build Karne Ke Liye
+Windows ke liye aapko Visual Studio (ya Build Tools) installed hona chahiye. In commands ko Developer Command Prompt for VS mein chalayein.
+Commands:
+Kotlin
+:: 1. Build directory banayein
+mkdir build_windows
+cd build_windows
+
+:: 2. CMake se Visual Studio project generate karein
+cmake .. -G "Visual Studio 17 2022" -A x64
+
+:: 3. Release version build karein
+cmake --build . --config Release
+Binary path: build_windows\Release\upx.exe
+3. Quick Tips
+•
+Submodules: Agar kabhi vendor directory khali ho, to ye command pehle chalayein: git submodule update --init --recursive
+•
+Rebrand: Agar aapne code mein "UPX" ko "Parallax" se badla hai, to upar wali commands chalane par naya binary automatically "Parallax" ke naam se hi build hoga (kyunki wo code uthayega).
+•
+Parallel Build: Linux mein --parallel flag CPU ke saare cores use karke fast build karta hai.
+Agar aapko Windows build ke liye MinGW use karna hai to batayein, main uski commands bhi de dunga.
