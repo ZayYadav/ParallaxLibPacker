@@ -98,9 +98,6 @@ jobs:
           echo "After strip:"
           ls -lh "$RAW"
 
-          # The customized packer can pack its own executable. This is the
-          # important step that turns the multi-megabyte raw static build into
-          # the compact distributable form used by the existing repo binary.
           "$RAW" --best --lzma -o "$FINAL" "$RAW"
           chmod +x "$FINAL"
 
@@ -112,7 +109,6 @@ jobs:
           BYTES=$(stat -c%s "$FINAL")
           echo "Final Linux size: ${BYTES} bytes"
 
-          # Guard against accidentally publishing an unpacked/raw build again.
           if [ "$BYTES" -gt 1572864 ]; then
             echo "ERROR: Linux binary is larger than 1.5 MiB; refusing artifact upload."
             exit 1
@@ -164,10 +160,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          # Do not hard-code Visual Studio 2022. windows-latest currently ships
+          # newer Visual Studio images, so let CMake choose the installed VS.
           cmake `
             -S "$env:SOURCE_DIR" `
             -B build-windows `
-            -G "Visual Studio 17 2022" `
             -A x64 `
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
@@ -201,8 +199,6 @@ jobs:
 
           Write-Host "Raw Windows binary: $($binary.Length) bytes"
 
-          # Produce the compact distributable instead of uploading the raw MSVC
-          # executable. UPX supports packing PE files, including its own binary.
           & $binary.FullName --best --lzma -o $final $binary.FullName
           if ($LASTEXITCODE -ne 0) {
             throw "Windows self-pack failed"
