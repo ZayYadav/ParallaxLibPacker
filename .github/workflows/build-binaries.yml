@@ -1,0 +1,253 @@
+name: Build ParallaxLibPacker
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+    paths:
+      - "upx-devel/**"
+      - ".github/workflows/build-binaries.yml"
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ==========================================================
+  # LINUX x64 STATIC
+  # ==========================================================
+  build-linux:
+    name: Linux x64 Static
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            git \
+            file
+
+      - name: Download Vendor Dependencies
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p upx-devel/vendor
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-bzip2.git \
+            upx-devel/vendor/bzip2
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-doctest.git \
+            upx-devel/vendor/doctest
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-lzma-sdk.git \
+            upx-devel/vendor/lzma-sdk
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-ucl.git \
+            upx-devel/vendor/ucl
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-valgrind.git \
+            upx-devel/vendor/valgrind
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-zlib.git \
+            upx-devel/vendor/zlib
+
+          git clone --depth 1 --branch upx-vendor \
+            https://github.com/upx/upx-vendor-zstd.git \
+            upx-devel/vendor/zstd
+
+      - name: Configure Linux Static Build
+        run: |
+          cmake \
+            -S upx-devel \
+            -B build-linux \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
+            -DUPX_CONFIG_DISABLE_GITREV=ON \
+            -DUPX_CONFIG_DISABLE_SANITIZE=ON \
+            -DUPX_CONFIG_DISABLE_WERROR=ON
+
+      - name: Build Linux
+        run: |
+          cmake \
+            --build build-linux \
+            --config Release \
+            --parallel
+
+      - name: Prepare Linux Binary
+        run: |
+          mkdir -p dist
+
+          cp \
+            build-linux/upx \
+            dist/ParallaxLibPacker-linux-x64
+
+          chmod +x \
+            dist/ParallaxLibPacker-linux-x64
+
+          echo "========== FILE INFO =========="
+          file dist/ParallaxLibPacker-linux-x64
+
+          echo "========== VERSION =========="
+          dist/ParallaxLibPacker-linux-x64 --version || true
+
+          echo "========== STATIC CHECK =========="
+          ldd dist/ParallaxLibPacker-linux-x64 || true
+
+          sha256sum \
+            dist/ParallaxLibPacker-linux-x64 \
+            > dist/ParallaxLibPacker-linux-x64.sha256
+
+      - name: Upload Linux Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParallaxLibPacker-Linux-x64
+          path: |
+            dist/ParallaxLibPacker-linux-x64
+            dist/ParallaxLibPacker-linux-x64.sha256
+          compression-level: 9
+          if-no-files-found: error
+
+
+  # ==========================================================
+  # WINDOWS x64
+  # ==========================================================
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Vendor Dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "upx-devel/vendor" | Out-Null
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-bzip2.git `
+            upx-devel/vendor/bzip2
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-doctest.git `
+            upx-devel/vendor/doctest
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-lzma-sdk.git `
+            upx-devel/vendor/lzma-sdk
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-ucl.git `
+            upx-devel/vendor/ucl
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-valgrind.git `
+            upx-devel/vendor/valgrind
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-zlib.git `
+            upx-devel/vendor/zlib
+
+          git clone --depth 1 --branch upx-vendor `
+            https://github.com/upx/upx-vendor-zstd.git `
+            upx-devel/vendor/zstd
+
+      - name: Configure Windows Build
+        shell: pwsh
+        run: |
+          cmake `
+            -S upx-devel `
+            -B build-windows `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DUPX_CONFIG_DISABLE_GITREV=ON `
+            -DUPX_CONFIG_DISABLE_SANITIZE=ON `
+            -DUPX_CONFIG_DISABLE_WERROR=ON
+
+      - name: Build Windows
+        shell: pwsh
+        run: |
+          cmake `
+            --build build-windows `
+            --config Release `
+            --parallel
+
+      - name: Prepare Windows Binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "dist" | Out-Null
+
+          $binary = Get-ChildItem `
+            -Path "build-windows" `
+            -Filter "upx.exe" `
+            -File `
+            -Recurse |
+            Where-Object {
+              $_.FullName -match "Release"
+            } |
+            Select-Object -First 1
+
+          if (-not $binary) {
+            throw "upx.exe build output nahi mila."
+          }
+
+          $output = "dist/ParallaxLibPacker-windows-x64.exe"
+
+          Copy-Item `
+            $binary.FullName `
+            $output
+
+          Write-Host "========== VERSION =========="
+
+          & $output --version
+
+          Write-Host "========== SHA256 =========="
+
+          $hash = Get-FileHash `
+            $output `
+            -Algorithm SHA256
+
+          "$($hash.Hash.ToLower())  ParallaxLibPacker-windows-x64.exe" |
+            Set-Content `
+              -Encoding ascii `
+              "dist/ParallaxLibPacker-windows-x64.exe.sha256"
+
+          Get-Item $output
+
+      - name: Upload Windows Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParallaxLibPacker-Windows-x64
+          path: |
+            dist/ParallaxLibPacker-windows-x64.exe
+            dist/ParallaxLibPacker-windows-x64.exe.sha256
+          compression-level: 9
+          if-no-files-found: error
