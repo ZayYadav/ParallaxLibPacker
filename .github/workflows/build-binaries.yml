@@ -112,7 +112,6 @@ jobs:
   build-windows:
     name: Windows x64 compact
     runs-on: ubuntu-22.04
-    needs: build-linux
 
     steps:
       - name: Checkout
@@ -129,7 +128,9 @@ jobs:
             cmake \
             ninja-build \
             git \
-            file
+            file \
+            curl \
+            xz-utils
 
       - name: Download required vendor dependencies
         shell: bash
@@ -148,17 +149,17 @@ jobs:
           clone_vendor upx-vendor-valgrind valgrind
           clone_vendor upx-vendor-zlib zlib
 
-      - name: Download Linux host packer
-        uses: actions/download-artifact@v4
-        with:
-          name: ParallaxLibPacker-Linux-x64
-          path: host-packer
-
-      - name: Prepare host packer
+      - name: Download official UPX 5.2.1 host compressor
         shell: bash
         run: |
-          chmod +x host-packer/ParallaxLibPacker-linux-x64
-          host-packer/ParallaxLibPacker-linux-x64 --version
+          set -euo pipefail
+          mkdir -p official-upx
+          curl -fL --retry 3 \
+            -o /tmp/upx.tar.xz \
+            "https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-amd64_linux.tar.xz"
+          tar -xJf /tmp/upx.tar.xz -C official-upx --strip-components=1
+          chmod +x official-upx/upx
+          official-upx/upx --version
 
       - name: Configure Windows x64 MinGW build
         shell: bash
@@ -188,7 +189,7 @@ jobs:
       - name: Build Windows x64
         run: cmake --build build-windows --config Release --parallel
 
-      - name: Strip and pack Windows binary
+      - name: Strip and compress Windows binary
         shell: bash
         run: |
           set -euo pipefail
@@ -213,14 +214,18 @@ jobs:
           echo "After strip:"
           ls -lh "$RAW"
 
-          host-packer/ParallaxLibPacker-linux-x64 \
-            --best --lzma \
-            -o "$FINAL" \
-            "$RAW"
+          # The customized fork's PE self-loader currently rejects its own
+          # Windows executable. Use pristine UPX 5.2.1 only as the final
+          # transport compressor; the executable being shipped is still the
+          # customized ParallaxLibPacker built from this repository.
+          official-upx/upx --best --lzma -o "$FINAL" "$RAW"
 
           echo "Final Windows binary:"
           ls -lh "$FINAL"
           file "$FINAL"
+
+          # Validate that the compressed image is structurally valid.
+          official-upx/upx -t "$FINAL"
 
           BYTES=$(stat -c%s "$FINAL")
           echo "Final Windows size: ${BYTES} bytes"
