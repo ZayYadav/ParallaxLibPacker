@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - "upx-devel/**"
+      - "scripts/**"
       - ".github/workflows/build-binaries.yml"
 
 permissions:
@@ -17,7 +18,7 @@ env:
 
 jobs:
   build-linux:
-    name: Linux x64 compact
+    name: Linux x64 compact + hardened
     runs-on: ubuntu-22.04
 
     steps:
@@ -46,7 +47,7 @@ jobs:
           clone_vendor upx-vendor-valgrind valgrind
           clone_vendor upx-vendor-zlib zlib
 
-      - name: Configure compact Linux build
+      - name: Configure compact hardened Linux build
         shell: bash
         run: |
           set -euo pipefail
@@ -56,9 +57,9 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
-            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
-            -DCMAKE_EXE_LINKER_FLAGS="-flto -Wl,--gc-sections -Wl,--as-needed" \
+            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto -Wl,--gc-sections -Wl,--as-needed -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack" \
             -DUPX_CONFIG_DISABLE_GITREV=ON \
             -DUPX_CONFIG_DISABLE_SANITIZE=ON \
             -DUPX_CONFIG_DISABLE_WERROR=ON \
@@ -67,6 +68,34 @@ jobs:
 
       - name: Build Linux
         run: cmake --build build-linux --config Release --parallel
+
+      - name: Validate Linux hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="build-linux/upx"
+
+          echo "ELF header:"
+          readelf -h "$RAW" | grep -E 'Type:|Machine:'
+
+          echo "RELRO:"
+          readelf -lW "$RAW" | grep GNU_RELRO
+
+          echo "Immediate binding:"
+          readelf -dW "$RAW" | grep -E 'BIND_NOW|FLAGS.*NOW'
+
+          echo "GNU_STACK:"
+          readelf -lW "$RAW" | grep GNU_STACK
+
+          if readelf -lW "$RAW" | grep GNU_STACK | grep -q 'RWE'; then
+            echo "ERROR: executable stack detected"
+            exit 1
+          fi
+
+          if readelf -lW "$RAW" | grep -E 'LOAD.*RWE' >/dev/null; then
+            echo "ERROR: writable+executable LOAD segment detected"
+            exit 1
+          fi
 
       - name: Strip and self-pack Linux binary
         shell: bash
@@ -98,6 +127,7 @@ jobs:
           fi
 
           sha256sum "$FINAL" > "${FINAL}.sha256"
+          sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
@@ -110,7 +140,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    name: Windows x64 compact
+    name: Windows x64 compact + hardened
     runs-on: ubuntu-22.04
 
     steps:
@@ -176,9 +206,9 @@ jobs:
             -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
-            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections" \
-            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections" \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,--gc-sections -s" \
+            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong -ffunction-sections -fdata-sections" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong -ffunction-sections -fdata-sections" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -Wl,--gc-sections -Wl,--dynamicbase -Wl,--nxcompat -s" \
             -DUPX_CONFIG_DISABLE_GITREV=ON \
             -DUPX_CONFIG_DISABLE_SANITIZE=ON \
             -DUPX_CONFIG_DISABLE_WERROR=ON \
@@ -188,6 +218,13 @@ jobs:
 
       - name: Build Windows x64
         run: cmake --build build-windows --config Release --parallel
+
+      - name: Validate Windows image flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="build-windows/upx.exe"
+          x86_64-w64-mingw32-objdump -p "$RAW" | grep -E 'DllCharacteristics|HIGH_ENTROPY_VA|DYNAMIC_BASE|NX_COMPAT' || true
 
       - name: Strip and compress Windows binary
         shell: bash
@@ -214,17 +251,14 @@ jobs:
           echo "After strip:"
           ls -lh "$RAW"
 
-          # The customized fork's PE self-loader currently rejects its own
-          # Windows executable. Use pristine UPX 5.2.1 only as the final
-          # transport compressor; the executable being shipped is still the
-          # customized ParallaxLibPacker built from this repository.
+          # Customized fork's PE loader rejects its own MinGW image, so the
+          # pristine host UPX is used only for transport compression. The
+          # executable shipped here is still built from this repository.
           official-upx/upx --best --lzma -o "$FINAL" "$RAW"
 
           echo "Final Windows binary:"
           ls -lh "$FINAL"
           file "$FINAL"
-
-          # Validate that the compressed image is structurally valid.
           official-upx/upx -t "$FINAL"
 
           BYTES=$(stat -c%s "$FINAL")
@@ -235,6 +269,7 @@ jobs:
           fi
 
           sha256sum "$FINAL" > "${FINAL}.sha256"
+          sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
