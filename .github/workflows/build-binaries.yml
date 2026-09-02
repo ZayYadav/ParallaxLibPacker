@@ -18,7 +18,7 @@ env:
 jobs:
   build-linux:
     name: Linux x64 compact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -35,7 +35,7 @@ jobs:
             git \
             file
 
-      - name: Download vendor dependencies
+      - name: Download required vendor dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -51,15 +51,13 @@ jobs:
             fi
           }
 
-          clone_vendor upx-vendor-bzip2 bzip2
           clone_vendor upx-vendor-doctest doctest
           clone_vendor upx-vendor-lzma-sdk lzma-sdk
           clone_vendor upx-vendor-ucl ucl
           clone_vendor upx-vendor-valgrind valgrind
           clone_vendor upx-vendor-zlib zlib
-          clone_vendor upx-vendor-zstd zstd
 
-      - name: Configure size optimized Linux build
+      - name: Configure compact Linux build
         shell: bash
         run: |
           set -euo pipefail
@@ -67,18 +65,19 @@ jobs:
             -S "$SOURCE_DIR" \
             -B build-linux \
             -G Ninja \
-            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-            -DCMAKE_C_FLAGS_MINSIZEREL="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
-            -DCMAKE_CXX_FLAGS_MINSIZEREL="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
-            -DCMAKE_EXE_LINKER_FLAGS="-static -flto -Wl,--gc-sections" \
+            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto -Wl,--gc-sections -Wl,--as-needed" \
             -DUPX_CONFIG_DISABLE_GITREV=ON \
             -DUPX_CONFIG_DISABLE_SANITIZE=ON \
             -DUPX_CONFIG_DISABLE_WERROR=ON \
-            -DUPX_CONFIG_DISABLE_WSTRICT=ON
+            -DUPX_CONFIG_DISABLE_WSTRICT=ON \
+            -DUPX_CONFIG_CMAKE_DISABLE_TEST=ON
 
       - name: Build Linux
-        run: cmake --build build-linux --config MinSizeRel --parallel
+        run: cmake --build build-linux --config Release --parallel
 
       - name: Strip and self-pack Linux binary
         shell: bash
@@ -89,9 +88,10 @@ jobs:
           RAW="build-linux/upx"
           FINAL="dist/ParallaxLibPacker-linux-x64"
 
-          echo "Raw binary:"
+          echo "Raw Linux binary:"
           ls -lh "$RAW"
           file "$RAW"
+          ldd "$RAW" || true
 
           strip --strip-all "$RAW"
 
@@ -101,7 +101,7 @@ jobs:
           "$RAW" --best --lzma -o "$FINAL" "$RAW"
           chmod +x "$FINAL"
 
-          echo "Final packed binary:"
+          echo "Final Linux binary:"
           ls -lh "$FINAL"
           file "$FINAL"
           "$FINAL" --version
@@ -109,8 +109,8 @@ jobs:
           BYTES=$(stat -c%s "$FINAL")
           echo "Final Linux size: ${BYTES} bytes"
 
-          if [ "$BYTES" -gt 1572864 ]; then
-            echo "ERROR: Linux binary is larger than 1.5 MiB; refusing artifact upload."
+          if [ "$BYTES" -gt 921600 ]; then
+            echo "ERROR: Linux binary is larger than 900 KiB."
             exit 1
           fi
 
@@ -128,97 +128,131 @@ jobs:
 
   build-windows:
     name: Windows x64 compact
-    runs-on: windows-latest
+    runs-on: ubuntu-22.04
+    needs: build-linux
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download vendor dependencies
-        shell: pwsh
+      - name: Install MinGW cross compiler
         run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path "$env:SOURCE_DIR/vendor" | Out-Null
+          sudo apt-get update
+          sudo apt-get install -y \
+            mingw-w64 \
+            binutils-mingw-w64-x86-64 \
+            cmake \
+            ninja-build \
+            git \
+            file
 
-          function Clone-Vendor([string]$repo, [string]$dst) {
-            $path = "$env:SOURCE_DIR/vendor/$dst"
-            if (-not (Test-Path "$path/.git")) {
-              git clone --depth 1 --branch upx-vendor "https://github.com/upx/$repo.git" $path
-              if ($LASTEXITCODE -ne 0) { throw "Failed to clone $repo" }
-            }
-          }
-
-          Clone-Vendor "upx-vendor-bzip2" "bzip2"
-          Clone-Vendor "upx-vendor-doctest" "doctest"
-          Clone-Vendor "upx-vendor-lzma-sdk" "lzma-sdk"
-          Clone-Vendor "upx-vendor-ucl" "ucl"
-          Clone-Vendor "upx-vendor-valgrind" "valgrind"
-          Clone-Vendor "upx-vendor-zlib" "zlib"
-          Clone-Vendor "upx-vendor-zstd" "zstd"
-
-      - name: Configure size optimized Windows build
-        shell: pwsh
+      - name: Download required vendor dependencies
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
+          set -euo pipefail
+          mkdir -p "$SOURCE_DIR/vendor"
 
-          # Do not hard-code Visual Studio 2022. windows-latest currently ships
-          # newer Visual Studio images, so let CMake choose the installed VS.
-          cmake `
-            -S "$env:SOURCE_DIR" `
-            -B build-windows `
-            -A x64 `
-            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-            -DUPX_CONFIG_DISABLE_GITREV=ON `
-            -DUPX_CONFIG_DISABLE_SANITIZE=ON `
-            -DUPX_CONFIG_DISABLE_WERROR=ON `
-            -DUPX_CONFIG_DISABLE_WSTRICT=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          clone_vendor() {
+            local repo="$1"
+            local dst="$2"
+            if [ ! -d "$SOURCE_DIR/vendor/$dst/.git" ]; then
+              git clone --depth 1 --branch upx-vendor \
+                "https://github.com/upx/$repo.git" \
+                "$SOURCE_DIR/vendor/$dst"
+            fi
+          }
 
-      - name: Build Windows Release
-        shell: pwsh
+          clone_vendor upx-vendor-doctest doctest
+          clone_vendor upx-vendor-lzma-sdk lzma-sdk
+          clone_vendor upx-vendor-ucl ucl
+          clone_vendor upx-vendor-valgrind valgrind
+          clone_vendor upx-vendor-zlib zlib
+
+      - name: Download Linux host packer
+        uses: actions/download-artifact@v4
+        with:
+          name: ParallaxLibPacker-Linux-x64
+          path: host-packer
+
+      - name: Prepare host packer
+        shell: bash
         run: |
-          cmake --build build-windows --config Release --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          chmod +x host-packer/ParallaxLibPacker-linux-x64
+          host-packer/ParallaxLibPacker-linux-x64 --version
 
-      - name: Self-pack Windows binary
-        shell: pwsh
+      - name: Configure Windows x64 MinGW build
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          set -euo pipefail
+          cmake \
+            -S "$SOURCE_DIR" \
+            -B build-windows \
+            -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+            -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG -ffunction-sections -fdata-sections -flto" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++ -flto -Wl,--gc-sections -s" \
+            -DUPX_CONFIG_DISABLE_GITREV=ON \
+            -DUPX_CONFIG_DISABLE_SANITIZE=ON \
+            -DUPX_CONFIG_DISABLE_WERROR=ON \
+            -DUPX_CONFIG_DISABLE_WSTRICT=ON \
+            -DUPX_CONFIG_CMAKE_DISABLE_TEST=ON \
+            -DUPX_CONFIG_CMAKE_DISABLE_PLATFORM_CHECK=ON
 
-          $binary = Get-ChildItem -Path "build-windows" -Filter "upx.exe" -File -Recurse |
-            Where-Object { $_.FullName -match "Release" } |
-            Select-Object -First 1
+      - name: Build Windows x64
+        run: cmake --build build-windows --config Release --parallel
 
-          if (-not $binary) {
-            throw "Release upx.exe build output not found"
-          }
+      - name: Strip and pack Windows binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
 
-          $final = Join-Path $PWD "dist/ParallaxLibPacker-windows-x64.exe"
+          RAW="build-windows/upx.exe"
+          FINAL="dist/ParallaxLibPacker-windows-x64.exe"
 
-          Write-Host "Raw Windows binary: $($binary.Length) bytes"
+          if [ ! -f "$RAW" ]; then
+            RAW=$(find build-windows -type f -iname 'upx.exe' | head -n 1)
+          fi
 
-          & $binary.FullName --best --lzma -o $final $binary.FullName
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows self-pack failed"
-          }
+          if [ -z "${RAW:-}" ] || [ ! -f "$RAW" ]; then
+            echo "ERROR: Windows upx.exe was not produced."
+            exit 1
+          fi
 
-          $packed = Get-Item $final
-          Write-Host "Final Windows size: $($packed.Length) bytes"
+          echo "Raw Windows binary:"
+          ls -lh "$RAW"
+          file "$RAW"
 
-          & $final --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packed Windows binary failed version test"
-          }
+          x86_64-w64-mingw32-strip --strip-all "$RAW"
 
-          if ($packed.Length -gt 2097152) {
-            throw "Windows binary is larger than 2 MiB; refusing artifact upload"
-          }
+          echo "After strip:"
+          ls -lh "$RAW"
 
-          $hash = Get-FileHash $final -Algorithm SHA256
-          "$($hash.Hash.ToLower())  ParallaxLibPacker-windows-x64.exe" |
-            Set-Content -Encoding ascii "dist/ParallaxLibPacker-windows-x64.exe.sha256"
+          host-packer/ParallaxLibPacker-linux-x64 \
+            --best --lzma \
+            -o "$FINAL" \
+            "$RAW"
+
+          echo "Final Windows binary:"
+          ls -lh "$FINAL"
+          file "$FINAL"
+
+          BYTES=$(stat -c%s "$FINAL")
+          echo "Final Windows size: ${BYTES} bytes"
+
+          if [ "$BYTES" -gt 1572864 ]; then
+            echo "ERROR: Windows binary is larger than 1.5 MiB."
+            exit 1
+          fi
+
+          sha256sum "$FINAL" > "${FINAL}.sha256"
 
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
