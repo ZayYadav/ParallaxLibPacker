@@ -1,5 +1,9 @@
 # Android endpoint hardening
 
+For signed and encrypted library distribution and the new `keygen`, `seal`,
+`verify`, and `restore` commands, see [SECURE-PACKAGES.md](../SECURE-PACKAGES.md).
+These packages require restoration before normal library loading.
+
 This directory contains application-layer hardening for the common attack where a runtime hook replaces an SDK URL/string and redirects requests to another server.
 
 ## What this protects
