@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -42,9 +44,73 @@ class PackageTests(unittest.TestCase):
         package.seal(self.source, other, self.enc, self.sign)
         self.assertNotEqual(self.sealed.read_bytes(), other.read_bytes())
 
+    def test_arbitrary_library_names_and_contents(self):
+        for index, name in enumerate(("libaudio.so", "libpayment.so", "custom module.so", "native.dll")):
+            with self.subTest(name=name):
+                source = self.root / name
+                payload = os.urandom(31 + index * 777)
+                source.write_bytes(payload)
+                sealed = self.root / f"{index}.plpkg"
+                restored = self.root / f"{index}.restored"
+                package.seal(source, sealed, self.enc, self.sign)
+                verified = package.verified_package(sealed, self.pub)
+                self.assertEqual(verified[3], {"name": name, "size": len(payload),
+                                               "sha256": hashlib.sha256(payload).hexdigest()})
+                self.assertEqual(package.decrypt_verified(verified, self.enc), payload)
+                package.restore(sealed, restored, self.enc, self.pub)
+                self.assertEqual(restored.read_bytes(), payload)
+
+    def rewrite_signed_metadata(self, metadata):
+        # Produce an authenticated but internally inconsistent package, as a faulty
+        # publisher might, so these tests exercise checks beyond signature validity.
+        nonce = os.urandom(12)
+        header = package.HEADER.pack(package.MAGIC, len(self.original), len(metadata), nonce)
+        aad = header + metadata
+        body = aad + package.AESGCM(self.enc.read_bytes()).encrypt(nonce, self.original, aad)
+        signer = package.Ed25519PrivateKey.from_private_bytes(self.sign.read_bytes())
+        self.sealed.write_bytes(body + signer.sign(body))
+
+    def test_signed_wrong_digest_rejected(self):
+        metadata = {"name": "input.so", "size": len(self.original), "sha256": "0" * 64}
+        self.rewrite_signed_metadata(json.dumps(metadata).encode("ascii"))
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            package.restore(self.sealed, self.output, self.enc, self.pub)
+        self.assertFalse(self.output.exists())
+
+    def test_signed_malformed_metadata_rejected(self):
+        valid = {"name": "input.so", "size": len(self.original),
+                 "sha256": hashlib.sha256(self.original).hexdigest()}
+        cases = [b"[]", b"{", b"\xff", b'{"name":"one","name":"two"}',
+                 json.dumps({**valid, "size": True}).encode(),
+                 json.dumps({**valid, "sha256": "x" * 64}).encode(),
+                 json.dumps({**valid, "extra": 1}).encode()]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                self.rewrite_signed_metadata(metadata)
+                with self.assertRaises(ValueError):
+                    package.restore(self.sealed, self.output, self.enc, self.pub)
+                self.assertFalse(self.output.exists())
+
+    def test_stored_filename_is_not_an_output_path(self):
+        metadata = {"name": "../outside.so", "size": len(self.original),
+                    "sha256": hashlib.sha256(self.original).hexdigest()}
+        self.rewrite_signed_metadata(json.dumps(metadata).encode("ascii"))
+        package.restore(self.sealed, self.output, self.enc, self.pub)
+        self.assertEqual(self.output.read_bytes(), self.original)
+        self.assertFalse((self.root / "outside.so").exists())
+
+    def test_signature_does_not_replace_gcm_verification(self):
+        body = bytearray(self.sealed.read_bytes()[:-64])
+        body[-1] ^= 1
+        signer = package.Ed25519PrivateKey.from_private_bytes(self.sign.read_bytes())
+        self.sealed.write_bytes(bytes(body) + signer.sign(bytes(body)))
+        with self.assertRaises(InvalidTag):
+            package.restore(self.sealed, self.output, self.enc, self.pub)
+        self.assertFalse(self.output.exists())
+
     def test_tampering_rejected_before_decrypt(self):
         original = self.sealed.read_bytes()
-        for offset in (0, 8, 16, package.HEADER.size, len(original) - 65, len(original) - 1):
+        for offset in (0, 8, 16, 20, package.HEADER.size, len(original) - 65, len(original) - 1):
             with self.subTest(offset=offset):
                 altered = bytearray(original)
                 altered[offset] ^= 1
