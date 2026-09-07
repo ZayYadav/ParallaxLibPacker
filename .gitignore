@@ -6,3 +6,8 @@ build/
 *.log
 local.properties
 .DS_Store
+.venv/
+__pycache__/
+private-keys/
+*.key
+*.plpkg
