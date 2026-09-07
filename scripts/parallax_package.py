@@ -2,6 +2,9 @@
 """Signed, encrypted distribution packages. Does not execute or load libraries."""
 
 import argparse
+import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 import struct
@@ -14,9 +17,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-MAGIC = b"PLPKG\x00\x01\x00"
-HEADER = struct.Struct(">8sQ12s")
+MAGIC = b"PLPKG\x00\x02\x00"
+HEADER = struct.Struct(">8sQI12s")
 MAX_INPUT = 128 * 1024 * 1024
+MAX_METADATA = 4096
 OVERHEAD = HEADER.size + 16 + 64
 
 
@@ -67,34 +71,76 @@ def seal(source, output, encryption_key, signing_key):
         raise ValueError("empty input is not supported")
     key = read_key(encryption_key)
     signer = Ed25519PrivateKey.from_private_bytes(read_key(signing_key))
+    metadata = json.dumps({
+        "name": Path(source).name,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }, sort_keys=True, separators=(",", ":")).encode("ascii")
+    if len(metadata) > MAX_METADATA:
+        raise ValueError("metadata exceeds size limit")
     nonce = os.urandom(12)
-    header = HEADER.pack(MAGIC, len(data), nonce)
-    body = header + AESGCM(key).encrypt(nonce, data, header)
+    header = HEADER.pack(MAGIC, len(data), len(metadata), nonce)
+    aad = header + metadata
+    body = aad + AESGCM(key).encrypt(nonce, data, aad)
     write_new(output, body + signer.sign(body))
 
 
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate metadata field")
+        result[key] = value
+    return result
+
+
 def verified_package(package, public_key):
-    data = read_bounded(package, MAX_INPUT + OVERHEAD)
+    data = read_bounded(package, MAX_INPUT + MAX_METADATA + OVERHEAD)
     if len(data) < OVERHEAD + 1:
         raise ValueError("truncated package")
-    magic, size, nonce = HEADER.unpack(data[:HEADER.size])
+    magic, size, metadata_size, nonce = HEADER.unpack(data[:HEADER.size])
     if magic != MAGIC or not 1 <= size <= MAX_INPUT:
         raise ValueError("unsupported format or invalid size")
-    if len(data) != size + OVERHEAD:
+    if not 1 <= metadata_size <= MAX_METADATA:
+        raise ValueError("invalid metadata length")
+    if len(data) != size + metadata_size + OVERHEAD:
         raise ValueError("package length mismatch")
     verifier = Ed25519PublicKey.from_public_bytes(read_key(public_key))
     verifier.verify(data[-64:], data[:-64])
-    return data, nonce, size
+    offset = HEADER.size + metadata_size
+    try:
+        metadata = json.loads(data[HEADER.size:offset].decode("ascii"),
+                              object_pairs_hook=unique_fields)
+    except (UnicodeError, RecursionError) as error:
+        raise ValueError("invalid metadata encoding or nesting") from error
+    if not isinstance(metadata, dict) or set(metadata) != {"name", "size", "sha256"}:
+        raise ValueError("invalid metadata fields")
+    if type(metadata["size"]) is not int or metadata["size"] != size:
+        raise ValueError("metadata size mismatch")
+    if not isinstance(metadata["name"], str) or not metadata["name"]:
+        raise ValueError("invalid metadata name")
+    digest = metadata["sha256"]
+    if (not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        raise ValueError("invalid metadata digest")
+    return data, nonce, offset, metadata
+
+
+def decrypt_verified(verified, encryption_key):
+    # Verify and decrypt the same buffer; never reopen the package after verification.
+    data, nonce, offset, metadata = verified
+    plaintext = AESGCM(read_key(encryption_key)).decrypt(
+        nonce, data[offset:-64], data[:offset]
+    )
+    if len(plaintext) != metadata["size"]:
+        raise ValueError("plaintext length mismatch")
+    if not hmac.compare_digest(hashlib.sha256(plaintext).hexdigest(), metadata["sha256"]):
+        raise ValueError("payload SHA-256 mismatch")
+    return plaintext
 
 
 def restore(package, output, encryption_key, public_key):
-    # Verify and decrypt the same buffer; never reopen the package after verification.
-    data, nonce, size = verified_package(package, public_key)
-    plaintext = AESGCM(read_key(encryption_key)).decrypt(
-        nonce, data[HEADER.size:-64], data[:HEADER.size]
-    )
-    if len(plaintext) != size:
-        raise ValueError("plaintext length mismatch")
+    plaintext = decrypt_verified(verified_package(package, public_key), encryption_key)
     # No plaintext file is created until both authentication checks pass.
     write_new(output, plaintext)
 
@@ -112,6 +158,7 @@ def main(argv=None):
     verify = commands.add_parser("verify", help="verify signature with a trusted public key")
     verify.add_argument("package")
     verify.add_argument("--public-key", required=True)
+    verify.add_argument("--encryption-key", help="also check GCM tag and payload SHA-256")
     unpack = commands.add_parser("restore", help="verify and decrypt to a NEW file")
     unpack.add_argument("package")
     unpack.add_argument("output")
@@ -124,8 +171,12 @@ def main(argv=None):
         elif args.command == "seal":
             seal(args.input, args.output, args.encryption_key, args.signing_key)
         elif args.command == "verify":
-            _, _, size = verified_package(args.package, args.public_key)
-            print(f"Signature valid; payload size: {size} bytes")
+            verified = verified_package(args.package, args.public_key)
+            if args.encryption_key:
+                decrypt_verified(verified, args.encryption_key)
+            print(json.dumps({"signature_valid": True,
+                              "payload_verified": bool(args.encryption_key),
+                              "metadata": verified[3]}, sort_keys=True))
         else:
             restore(args.package, args.output, args.encryption_key, args.public_key)
     except (InvalidSignature, InvalidTag):
