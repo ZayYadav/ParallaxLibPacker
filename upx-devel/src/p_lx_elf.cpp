@@ -5536,7 +5536,14 @@ unsigned PackLinuxElf::pack2_shlib_overlay_init(OutputFile *fo)
     overlay_offset = total_out;
 
     p_info hbuf;
-    set_te32(&hbuf.p_progid, 0);
+    if (Elf64_Ehdr::EM_AARCH64 == e_machine && saved_opt_android_shlib) {
+        if (progid == 0)
+            progid = getRandomId();
+        if (progid == 0)
+            throwInternalError("PVM4 program id generation failed");
+    }
+    set_te32(&hbuf.p_progid,
+             (Elf64_Ehdr::EM_AARCH64 == e_machine && saved_opt_android_shlib) ? progid : 0);
     set_te32(&hbuf.p_filesize, file_size);
     set_te32(&hbuf.p_blocksize, blocksize);
     fo->write(&hbuf, sizeof(hbuf));  total_out += sizeof(hbuf);
@@ -5553,6 +5560,22 @@ unsigned PackLinuxElf::pack2_shlib_overlay_write(OutputFile *fo, MemBuffer &mb,
     set_te32(&tmp.sz_cpr, c_len);
     tmp.b_method = (EM_ARM == e_machine) ? M_NRV2B_8 : M_NRV2B_LE32;
     tmp.b_extra = 0;
+
+    const bool pvm4 = Elf64_Ehdr::EM_AARCH64 == e_machine && saved_opt_android_shlib;
+    if (pvm4) {
+        if (progid == 0 || c_len == 0)
+            throwInternalError("PVM4 block state invalid");
+        const unsigned tag = PARALLAX_VM4_MARKER | (getRandomId() & 0x0fu);
+        tmp.b_extra = (unsigned char)tag;
+        parallax_vm4_encode(
+                (unsigned char *)mb.raw_ptr(), c_len, progid,
+                u_len, c_len, tmp.b_method, tag);
+
+        // pack2_shlib_overlay_compress() computed c_adler before PVM4.
+        // Replace it with the checksum of the bytes actually written to disk.
+        ph.c_adler = upx_adler32(mb, c_len, ph.saved_c_adler);
+    }
+
     fo->write(&tmp, sizeof(tmp));   total_out += sizeof(tmp);
     b_len += sizeof(b_info);
     fo->write(mb, c_len); total_out += c_len;
