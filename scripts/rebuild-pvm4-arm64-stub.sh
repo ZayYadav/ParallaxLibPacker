@@ -29,6 +29,8 @@ if [[ ! -d "$STUBTOOLS_DIR/bin-upx-20221212" ]]; then
 fi
 export PATH="$STUBTOOLS_DIR/bin-upx-20221212:$PATH"
 
+mkdir -p "$SOURCE_DIR/src/stub/tmp"
+
 for tool in arm64-linux-gcc-4.9.2 arm64-linux-ld-2.25 arm64-linux-objcopy-2.25; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "ERROR: UPX stub tool missing: $tool" >&2
