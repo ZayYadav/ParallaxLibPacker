@@ -22,38 +22,38 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Python ${{ matrix.python }} / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-        python:
-          - "3.10"
-          - "3.14"
-
+  test-linux:
+    name: Linux security tests
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
+        uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-
-      - name: Install locked security dependencies
+          python-version: "3.14"
+      - name: Install locked dependencies
         run: python -m pip install --only-binary=:all: -r scripts/requirements-secure.txt
-
-      - name: Python security tests
+      - name: Python tests
         run: python -m unittest discover -s tests -v
-
-      - name: PVM4 C round-trip vectors
-        if: ${{ runner.os == 'Linux' }}
+      - name: PVM4 native vectors
         shell: bash
         run: |
           set -euo pipefail
           cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
           /tmp/pvm4-roundtrip
+
+  test-windows:
+    name: Windows security tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install locked dependencies
+        run: python -m pip install --only-binary=:all: -r scripts/requirements-secure.txt
+      - name: Python tests
+        run: python -m unittest discover -s tests -v
