@@ -27,6 +27,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+# Keys, manifests and temporary protection products default to owner-only.
+if os.name == "posix":
+    os.umask(0o077)
+
 SCHEMA = "parallax-ultra-manifest-v2"
 PROFILE = "parallax-pvm4-arm64-v2"
 MAX_LIB_SIZE = 1024 * 1024 * 1024
