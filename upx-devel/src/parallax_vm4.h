@@ -149,13 +149,18 @@ static inline void parallax_vm4_stage(
 }
 
 static inline unsigned parallax_vm4_order(unsigned lane, unsigned index) {
-    static const unsigned char order[4][4] = {
-        {0, 1, 2, 3},
-        {1, 3, 0, 2},
-        {2, 0, 3, 1},
-        {3, 2, 1, 0}
-    };
-    return order[lane & PARALLAX_VM4_LANE_MASK][index & 3u];
+    unsigned packed;
+    lane &= PARALLAX_VM4_LANE_MASK;
+    index &= 3u;
+    if (lane == 0u)
+        packed = 0x03020100u;
+    else if (lane == 1u)
+        packed = 0x02000301u;
+    else if (lane == 2u)
+        packed = 0x01030002u;
+    else
+        packed = 0x00010203u;
+    return (packed >> (index * 8u)) & 0xffu;
 }
 
 static inline void parallax_vm4_encode(
