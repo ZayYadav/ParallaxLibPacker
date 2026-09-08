@@ -132,20 +132,15 @@ static inline void parallax_vm4_stage(
         unsigned seed,
         unsigned tag,
         int inverse) {
-    switch (stage & 3u) {
-    case 0:
+    stage &= 3u;
+    if (stage == 0u)
         parallax_vm4_stage_stream_xor(data, len, seed ^ 0x13198a2eu);
-        break;
-    case 1:
+    else if (stage == 1u)
         parallax_vm4_stage_add(data, len, seed ^ 0xa4093822u, tag, inverse);
-        break;
-    case 2:
+    else if (stage == 2u)
         parallax_vm4_stage_rotate(data, len, seed ^ 0x299f31d0u, tag, inverse);
-        break;
-    default:
+    else
         parallax_vm4_stage_permute(data, len, seed ^ 0x082efa98u);
-        break;
-    }
 }
 
 static inline unsigned parallax_vm4_order(unsigned lane, unsigned index) {
