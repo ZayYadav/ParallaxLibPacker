@@ -132,6 +132,12 @@ static noreturn void e_optarg(const char *n) {
     e_exit(EXIT_USAGE);
 }
 
+static noreturn void e_disabled(const char *n) {
+    fflush(con_term);
+    fprintf(stderr, "%s: command '%s' is disabled in the hardened Parallax build\n", argv0, n);
+    e_exit(EXIT_USAGE);
+}
+
 static noreturn void e_optval(const char *n) {
     fflush(con_term);
     fprintf(stderr, "%s: invalid value for option '%s'\n", argv0, n);
@@ -244,6 +250,63 @@ static bool set_method(int m, int l) {
         opt->level = l;
     set_cmd(CMD_COMPRESS);
     return true;
+}
+
+static void enforce_parallax_ultra_profile() {
+    if (!opt->o_unix.parallax_ultra_lib)
+        return;
+
+    if (opt->cmd != CMD_COMPRESS) {
+        fprintf(stderr,
+                "%s: --parallax-ultra-lib is protection-only and cannot be combined "
+                "with list/test/info commands\n",
+                argv0);
+        e_usage();
+    }
+
+    // Re-lock the security profile after environment and all CLI options have
+    // been parsed. This prevents UPX environment options or later arguments
+    // from weakening the Ultra configuration.
+    opt->cmd = CMD_COMPRESS;
+    opt->method = M_LZMA;
+    opt->level = 10;
+    opt->filter = FT_NONE;
+    opt->ultra_brute = false;
+    opt->all_methods = false;
+    opt->all_methods_use_lzma = 1;
+    opt->all_filters = false;
+    opt->no_filter = false;
+    opt->prefer_ucl = false;
+    opt->exact = false;
+    opt->small = 0;
+
+    opt->backup = 0;
+    opt->force = 0;
+    opt->force_overwrite = false;
+    opt->info_mode = 0;
+    opt->no_env = true;
+    opt->overlay = opt->COPY_OVERLAY;
+    opt->to_stdout = false;
+
+    opt->debug.debug_level = 0;
+    opt->debug.disable_random_id = false;
+    opt->debug.dump_stub_loader = nullptr;
+    opt->debug.fake_stub_version[0] = 0;
+    opt->debug.fake_stub_year[0] = 0;
+    opt->debug.use_random_method = false;
+    opt->debug.use_random_filter = false;
+
+    opt->o_unix.blocksize = 0;
+    opt->o_unix.force_execve = false;
+    opt->o_unix.is_ptinterp = false;
+    opt->o_unix.use_ptinterp = false;
+    opt->o_unix.make_ptinterp = false;
+    opt->o_unix.unmap_all_pages = false;
+    opt->o_unix.preserve_build_id = false;
+    opt->o_unix.android_shlib = true;
+    opt->o_unix.android_old = false;
+    opt->o_unix.force_pie = false;
+    opt->o_unix.catch_sigsegv = false;
 }
 
 static void set_output_name(const char *n, bool allow_m) {
@@ -359,7 +422,7 @@ static noinline int do_option(int optc, const char *arg) {
         break;
 #endif
     case 'd':
-        set_cmd(CMD_DECOMPRESS);
+        e_disabled("decompress");
         break;
     case 'D':
         opt->debug.debug_level++;
@@ -730,7 +793,19 @@ static noinline int do_option(int optc, const char *arg) {
         opt->o_unix.preserve_build_id = true;
         break;
     case 676:
+        // Legacy internal selector; no public long option maps here.
         opt->o_unix.android_shlib = true;
+        break;
+    case 920: // --parallax-ultra-lib
+        opt->o_unix.android_shlib = true;
+        opt->o_unix.parallax_ultra_lib = true;
+        opt->no_env = true;
+        opt->backup = 0;
+        opt->all_methods_use_lzma = 1;
+        if (!set_method(M_LZMA, -1))
+            e_method(M_LZMA, 10);
+        if (!set_method(-1, 10))
+            e_method(opt->method, 10);
         break;
     case 677:
         opt->o_unix.force_pie = true;
@@ -821,7 +896,6 @@ int main_get_options(int argc, char **argv) {
         {"best", 0x10, N, 900},        // compress best
         {"brute", 0x10, N, 901},       // compress best, brute force
         {"ultra-brute", 0x10, N, 902}, // compress best, ultra-brute force
-        {"decompress", 0, N, 'd'},     // decompress
         {"fast", 0x10, N, '1'},        // compress faster
         {"fileinfo", 0x10, N, 909},    // display info about file
         {"file-info", 0x10, N, 909},   // display info about file
@@ -831,7 +905,6 @@ int main_get_options(int argc, char **argv) {
         {"sysinfo", 0x90, N, 910},     // display system info // undocumented and subject to change
         {"sys-info", 0x90, N, 910},    // display system info // undocumented and subject to change
         {"test", 0, N, 't'},           // test compressed file integrity
-        {"uncompress", 0, N, 'd'},     // decompress
         {"version", 0, N, 'V' + 256},  // display version number
 
         // options
@@ -856,7 +929,8 @@ int main_get_options(int argc, char **argv) {
 #endif
         {"verbose", 0, N, 'v'}, // verbose mode
 
-        // debug options
+        // Debug-only switches are unavailable in release builds.
+#if DEBUG
         {"debug", 0x10, N, 'D'},
         {"dump-stub-loader", 0x31, N, 544},        // for internal debugging
         {"fake-stub-version", 0x31, N, 542},       // for internal debugging
@@ -864,6 +938,7 @@ int main_get_options(int argc, char **argv) {
         {"disable-random-id", 0x90, N, 545},       // for internal debugging
         {"debug-use-random-method", 0x90, N, 546}, // for internal debugging / fuzz testing
         {"debug-use-random-filter", 0x90, N, 547}, // for internal debugging / fuzz testing
+#endif
 
         // backup options
         {"backup", 0x10, N, 'k'},
@@ -952,7 +1027,7 @@ int main_get_options(int argc, char **argv) {
         {"openbsd", 0x10, N, 669},
         {"unmap-all-pages", 0x10, N, 674}, // linux /proc/self/exe vanishes
         {"preserve-build-id", 0, N, 675},
-        {"android-shlib", 0, N, 676},
+        {"parallax-ultra-lib", 0, N, 920},
         {"force-pie", 0x90, N, 677},
         {"android-old", 0, N, 678},
         {"catch-sigsegv", 0, N, 679},
@@ -1305,8 +1380,13 @@ int upx_main(int argc, char *argv[]) may_throw {
     if (argc == 1)
         e_help();
     set_term(stderr);
+    enforce_parallax_ultra_profile();
     check_and_update_options(i, argc);
     int num_files = argc - i;
+    if (opt->o_unix.parallax_ultra_lib && num_files != 1) {
+        fprintf(stderr, "%s: --parallax-ultra-lib requires exactly one input file\n", argv0);
+        e_usage();
+    }
     if (num_files < 1) {
         if (opt->verbose >= 2)
             e_help();

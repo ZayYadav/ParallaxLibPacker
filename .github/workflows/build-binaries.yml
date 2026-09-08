@@ -5,9 +5,17 @@ on:
   push:
     branches:
       - main
+      - ultra-multivm-hardening
     paths:
       - "upx-devel/**"
       - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/build-binaries.yml"
+  pull_request:
+    paths:
+      - "upx-devel/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/build-binaries.yml"
 
 permissions:
@@ -23,12 +31,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build tools
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils cmake ninja-build git file
+          sudo apt-get install -y \
+            build-essential binutils cmake ninja-build git file curl xz-utils perl python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libc6:i386 zlib1g:i386 libmpfr6
 
       - name: Download required vendor dependencies
         shell: bash
@@ -36,16 +48,33 @@ jobs:
           set -euo pipefail
           mkdir -p "$SOURCE_DIR/vendor"
           clone_vendor() {
-            local repo="$1" dst="$2"
-            if [ ! -d "$SOURCE_DIR/vendor/$dst/.git" ]; then
-              git clone --depth 1 --branch upx-vendor "https://github.com/upx/$repo.git" "$SOURCE_DIR/vendor/$dst"
-            fi
+            local repo="$1" dst="$2" sha="$3"
+            local dir="$SOURCE_DIR/vendor/$dst"
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/upx/$repo.git"
+            git -C "$dir" fetch -q --depth 1 origin "$sha"
+            git -C "$dir" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
           }
-          clone_vendor upx-vendor-doctest doctest
-          clone_vendor upx-vendor-lzma-sdk lzma-sdk
-          clone_vendor upx-vendor-ucl ucl
-          clone_vendor upx-vendor-valgrind valgrind
-          clone_vendor upx-vendor-zlib zlib
+          clone_vendor upx-vendor-doctest doctest 835aaee34666173532e98437b057f37b385076c9
+          clone_vendor upx-vendor-lzma-sdk lzma-sdk f9637f9f563d17b6ecf33ae2212dcd44866bfb25
+          clone_vendor upx-vendor-ucl ucl a60611d342b0b7d2924c495ebaa1910e4c3c3fe6
+          clone_vendor upx-vendor-valgrind valgrind b054e44ea1b6d630853ed74d33e0934ef4642efc
+          clone_vendor upx-vendor-zlib zlib 0a41a7d0a974d0b43afe4afe4b8025c8f144474e
+
+      - name: Test PVM4 core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
+          /tmp/pvm4-roundtrip
+
+      - name: Regenerate hardened ARM64 ELF-SO runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rebuild-pvm4-arm64-stub.sh "$SOURCE_DIR"
 
       - name: Configure full-size static Linux build
         shell: bash
@@ -68,6 +97,67 @@ jobs:
 
       - name: Build Linux
         run: cmake --build build-linux --config Release --parallel
+
+      - name: Protect real ARM64 strlen sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/parallax-sample.c <<'EOF'
+          #include <stddef.h>
+          #include <string.h>
+
+          __attribute__((visibility("default")))
+          size_t parallax_sample_strlen(const char *s) {
+              return strlen(s);
+          }
+
+          __attribute__((visibility("default"), used, section(".rodata.parallax")))
+          const unsigned char parallax_sample_blob[1048576] = { 0x50, 0x56, 0x4d, 0x34 };
+          EOF
+
+          aarch64-linux-gnu-gcc -fPIC -shared -O2             -Wl,-z,relro,-z,now,-z,noexecstack             -o /tmp/libparallax_sample.so /tmp/parallax-sample.c
+
+          readelf -h /tmp/libparallax_sample.so | grep -q 'AArch64'
+          readelf -d /tmp/libparallax_sample.so | grep -q 'BIND_NOW'
+          aarch64-linux-gnu-readelf -Ws /tmp/libparallax_sample.so | grep -q ' strlen@'
+
+          rm -f /tmp/libparallax_sample.protected.so /tmp/libparallax_sample.protected2.so
+
+          # Hostile inherited options and later weak CLI switches must not
+          # downgrade the centrally locked Ultra profile.
+          PARALLAX='--disable-random-id --no-lzma --overlay=strip --small' \
+            build-linux/upx --parallax-ultra-lib --no-lzma --overlay=strip               -o /tmp/libparallax_sample.protected.so               /tmp/libparallax_sample.so
+
+          PARALLAX='--disable-random-id --no-lzma' \
+            build-linux/upx --parallax-ultra-lib               -o /tmp/libparallax_sample.protected2.so               /tmp/libparallax_sample.so
+
+          test -s /tmp/libparallax_sample.protected.so
+          test -s /tmp/libparallax_sample.protected2.so
+          if cmp -s /tmp/libparallax_sample.protected.so /tmp/libparallax_sample.protected2.so; then
+            echo "ERROR: independent Ultra protection runs were byte-identical"
+            exit 1
+          fi
+          readelf -h /tmp/libparallax_sample.protected.so | grep -q 'AArch64'
+
+          if readelf -lW /tmp/libparallax_sample.protected.so | grep -E 'LOAD.*RWE' >/dev/null; then
+            echo "ERROR: protected sample contains RWX PT_LOAD"
+            exit 1
+          fi
+
+          if readelf -lW /tmp/libparallax_sample.protected.so | grep GNU_STACK | grep -q 'RWE'; then
+            echo "ERROR: protected sample has executable stack"
+            exit 1
+          fi
+
+          if build-linux/upx -d /tmp/libparallax_sample.protected.so                -o /tmp/should-not-restore.so >/tmp/unpack.log 2>&1; then
+            echo "ERROR: public decompression unexpectedly restored protected library"
+            cat /tmp/unpack.log
+            exit 1
+          fi
+          test ! -e /tmp/should-not-restore.so
+
+          sha256sum /tmp/libparallax_sample.so /tmp/libparallax_sample.protected.so
+          echo "ARM64 PVM4 protection regression: PASS"
 
       - name: Validate Linux image
         shell: bash
@@ -129,7 +219,7 @@ jobs:
           sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parallax_linux
           path: |
@@ -144,10 +234,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install x64 MinGW cross compiler
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y \
             gcc-mingw-w64-x86-64-posix \
@@ -159,7 +250,12 @@ jobs:
             git \
             file \
             curl \
-            xz-utils
+            xz-utils \
+            perl \
+            python3 \
+            libc6:i386 \
+            zlib1g:i386 \
+            libmpfr6
 
       - name: Download required vendor dependencies
         shell: bash
@@ -167,16 +263,33 @@ jobs:
           set -euo pipefail
           mkdir -p "$SOURCE_DIR/vendor"
           clone_vendor() {
-            local repo="$1" dst="$2"
-            if [ ! -d "$SOURCE_DIR/vendor/$dst/.git" ]; then
-              git clone --depth 1 --branch upx-vendor "https://github.com/upx/$repo.git" "$SOURCE_DIR/vendor/$dst"
-            fi
+            local repo="$1" dst="$2" sha="$3"
+            local dir="$SOURCE_DIR/vendor/$dst"
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/upx/$repo.git"
+            git -C "$dir" fetch -q --depth 1 origin "$sha"
+            git -C "$dir" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
           }
-          clone_vendor upx-vendor-doctest doctest
-          clone_vendor upx-vendor-lzma-sdk lzma-sdk
-          clone_vendor upx-vendor-ucl ucl
-          clone_vendor upx-vendor-valgrind valgrind
-          clone_vendor upx-vendor-zlib zlib
+          clone_vendor upx-vendor-doctest doctest 835aaee34666173532e98437b057f37b385076c9
+          clone_vendor upx-vendor-lzma-sdk lzma-sdk f9637f9f563d17b6ecf33ae2212dcd44866bfb25
+          clone_vendor upx-vendor-ucl ucl a60611d342b0b7d2924c495ebaa1910e4c3c3fe6
+          clone_vendor upx-vendor-valgrind valgrind b054e44ea1b6d630853ed74d33e0934ef4642efc
+          clone_vendor upx-vendor-zlib zlib 0a41a7d0a974d0b43afe4afe4b8025c8f144474e
+
+      - name: Test PVM4 core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
+          /tmp/pvm4-roundtrip
+
+      - name: Regenerate hardened ARM64 ELF-SO runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rebuild-pvm4-arm64-stub.sh "$SOURCE_DIR"
 
       - name: Download official UPX 5.2.1 host compressor
         shell: bash
@@ -186,6 +299,7 @@ jobs:
           curl -fL --retry 3 \
             -o /tmp/upx.tar.xz \
             "https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-amd64_linux.tar.xz"
+          echo "402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657  /tmp/upx.tar.xz" | sha256sum -c -
           tar -xJf /tmp/upx.tar.xz -C official-upx --strip-components=1
           chmod +x official-upx/upx
           official-upx/upx --version
@@ -271,7 +385,7 @@ jobs:
           sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Windows binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ParallaxLibPacker-Windows-x64
           path: |

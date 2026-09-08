@@ -41,7 +41,9 @@
 #include "p_unix.h"
 #include "p_lx_exc.h"
 #include "p_lx_elf.h"
+#include "parallax_vm4.h"
 #include "ui.h"
+#include <random>
 
 // NOLINTBEGIN(clang-analyzer-core.CallAndMessage)
 // NOLINTBEGIN(clang-analyzer-deadcode.DeadStores)
@@ -52,6 +54,19 @@
 #endif
 
 using upx::umin;
+
+static unsigned parallax_secure_random_u32() {
+    std::random_device rd;
+    unsigned value = 0;
+    for (unsigned i = 0; i < 8 && value == 0; ++i) {
+        value ^= ((unsigned)rd() << ((i & 1u) ? 0u : 16u));
+        value ^= 0x9e3779b9u * (i + 1u);
+        value = (value << 13) | (value >> 19);
+    }
+    if (value == 0)
+        throwInternalError("Parallax secure random id generation failed");
+    return value;
+}
 
 #define PT_LOAD Elf32_Phdr::PT_LOAD  /* 64-bit PT_LOAD is the same */
 #define PT_NOTE32   Elf32_Phdr::PT_NOTE
@@ -5536,7 +5551,19 @@ unsigned PackLinuxElf::pack2_shlib_overlay_init(OutputFile *fo)
     overlay_offset = total_out;
 
     p_info hbuf;
-    set_te32(&hbuf.p_progid, 0);
+    if (opt->o_unix.parallax_ultra_lib) {
+        if (Elf64_Ehdr::EM_AARCH64 != e_machine ||
+            Elf64_Ehdr::ET_DYN != e_type ||
+            !saved_opt_android_shlib) {
+            throwCantPack("Parallax Ultra supports only Android ARM64 ET_DYN shared libraries");
+        }
+        if (progid == 0)
+            progid = parallax_secure_random_u32();
+        if (progid == 0)
+            throwInternalError("PVM4 program id generation failed");
+    }
+    set_te32(&hbuf.p_progid,
+             (Elf64_Ehdr::EM_AARCH64 == e_machine && saved_opt_android_shlib) ? progid : 0);
     set_te32(&hbuf.p_filesize, file_size);
     set_te32(&hbuf.p_blocksize, blocksize);
     fo->write(&hbuf, sizeof(hbuf));  total_out += sizeof(hbuf);
@@ -5553,6 +5580,23 @@ unsigned PackLinuxElf::pack2_shlib_overlay_write(OutputFile *fo, MemBuffer &mb,
     set_te32(&tmp.sz_cpr, c_len);
     tmp.b_method = (EM_ARM == e_machine) ? M_NRV2B_8 : M_NRV2B_LE32;
     tmp.b_extra = 0;
+
+    const bool pvm4 = Elf64_Ehdr::EM_AARCH64 == e_machine && saved_opt_android_shlib;
+    if (pvm4) {
+        if (progid == 0 || c_len == 0)
+            throwInternalError("PVM4 block state invalid");
+        const unsigned tag =
+                PARALLAX_VM4_MARKER | (parallax_secure_random_u32() & 0x0fu);
+        tmp.b_extra = (unsigned char)tag;
+        parallax_vm4_encode(
+                (unsigned char *)mb.raw_ptr(), c_len, progid,
+                u_len, c_len, tmp.b_method, tag);
+
+        // pack2_shlib_overlay_compress() computed c_adler before PVM4.
+        // Replace it with the checksum of the bytes actually written to disk.
+        ph.c_adler = upx_adler32(mb, c_len, ph.saved_c_adler);
+    }
+
     fo->write(&tmp, sizeof(tmp));   total_out += sizeof(tmp);
     b_len += sizeof(b_info);
     fo->write(mb, c_len); total_out += c_len;

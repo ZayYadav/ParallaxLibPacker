@@ -31,6 +31,7 @@
 
 
 #include "include/linux.h"
+#include "../../parallax_vm4.h"
 
 // Pprotect is mprotect, but page-aligned on the lo end (Linux requirement)
 extern unsigned Pprotect(void *, size_t, unsigned);
@@ -148,6 +149,14 @@ typedef struct {
 
 
 static void
+parallax_secure_zero(void *address, size_t length)
+{
+    volatile unsigned char *p = (volatile unsigned char *)address;
+    while (length-- != 0)
+        *p++ = 0;
+}
+
+static void
 xread(Extent *x, char *buf, size_t count)
 {
     DPRINTF("xread x.size=%%x  x.buf=%%p  buf=%%p  count=%%x\\n",
@@ -176,7 +185,8 @@ int f_expand( // .globl in $(ARCH)-linux.elf-so_fold.S
 static void
 unpackExtent(
     Extent *const xi,  // input includes struct b_info
-    Extent *const xo   // output
+    Extent *const xo,  // output
+    unsigned const pvm_program_id
 )
 {
     while (xo->size) {
@@ -205,6 +215,41 @@ ERR_LAB
         ||  h.sz_unc > xo->size ) {
             err_exit(5);
         }
+
+#if defined(__aarch64__)
+        unsigned char *const pvm_block_start = (unsigned char *)xi->buf;
+        size_t const pvm_block_size = h.sz_cpr;
+        if (pvm_program_id != 0 && !parallax_vm4_is_tag(h.b_unused)) {
+            err_exit(9);
+        }
+        /*
+         * PVM4 is opt-in per block via b_unused. The disk copy remains in
+         * diversified form; only the block currently being consumed is
+         * decoded inside the already-private side buffer.
+         */
+        if (parallax_vm4_is_tag(h.b_unused)) {
+            if (pvm_program_id == 0 || h.sz_cpr == 0) {
+                err_exit(9);
+            }
+            parallax_vm4_decode(
+                    (unsigned char *)xi->buf,
+                    h.sz_cpr,
+                    pvm_program_id,
+                    h.sz_unc,
+                    h.sz_cpr,
+                    h.b_method,
+                    h.b_unused);
+
+            /*
+             * f_expand() receives the b_info immediately before xi->buf.
+             * Clear only the private copy's transport marker so legacy
+             * decompressor code never interprets it as compression metadata.
+             */
+            ((struct b_info *)(void *)(xi->buf - sizeof(h)))->b_unused = 0;
+        }
+#else
+        (void)pvm_program_id;
+#endif
         // Now we have:
         //   assert(h.sz_cpr <= h.sz_unc);
         //   assert(h.sz_unc > 0 && h.sz_unc <= blocksize);
@@ -218,6 +263,9 @@ ERR_LAB
                 DPRINTF("  j=%%x  out_len=%%x  &h=%%p\\n", j, out_len, &h);
                 err_exit(7);
             }
+#if defined(__aarch64__)
+            parallax_secure_zero(pvm_block_start, pvm_block_size);
+#endif
             xi->buf  += h.sz_cpr;
             xi->size -= h.sz_cpr;
         }
@@ -265,6 +313,598 @@ extern int memfd_create(const char *name, unsigned int flags);
 #define ElfW(sym) Elf64_ ## sym
 
 #define nullptr (void *)0
+
+#if defined(__aarch64__)
+
+/*
+ * Conservative client-side hook guard for Android ARM64 shared libraries.
+ *
+ * Compatibility rules:
+ *   - no network access or server dependency;
+ *   - no port probing;
+ *   - root/Magisk alone is not a failure signal;
+ *   - only strong hook/tracer evidence is fatal;
+ *   - checks use /proc plus already-relocated ELF metadata and do not patch GOT.
+ */
+
+#define PARALLAX_PT_DYNAMIC 2
+#define PARALLAX_DT_NULL 0
+#define PARALLAX_DT_PLTRELSZ 2
+#define PARALLAX_DT_STRTAB 5
+#define PARALLAX_DT_SYMTAB 6
+#define PARALLAX_DT_RELA 7
+#define PARALLAX_DT_RELASZ 8
+#define PARALLAX_DT_RELAENT 9
+#define PARALLAX_DT_PLTREL 20
+#define PARALLAX_DT_JMPREL 23
+#define PARALLAX_R_AARCH64_GLOB_DAT 1025u
+#define PARALLAX_R_AARCH64_JUMP_SLOT 1026u
+
+typedef struct {
+    Elf64_Sxword d_tag;
+    union {
+        Elf64_Xword d_val;
+        Elf64_Addr d_ptr;
+    } d_un;
+} ParallaxDyn64;
+
+typedef struct {
+    Elf64_Addr r_offset;
+    Elf64_Xword r_info;
+    Elf64_Sxword r_addend;
+} ParallaxRela64;
+
+typedef struct {
+    Elf64_Word st_name;
+    unsigned char st_info;
+    unsigned char st_other;
+    Elf64_Half st_shndx;
+    Elf64_Addr st_value;
+    Elf64_Xword st_size;
+} ParallaxSym64;
+
+static unsigned char parallax_ascii_lower(unsigned char c) {
+    if (c >= 'A' && c <= 'Z')
+        return (unsigned char)(c + ('a' - 'A'));
+    return c;
+}
+
+static unsigned char parallax_token_byte(uint64_t lo, uint64_t hi, unsigned index) {
+    if (index < 8u)
+        return (unsigned char)((lo >> (index * 8u)) & 0xffu);
+    index -= 8u;
+    return (unsigned char)((hi >> (index * 8u)) & 0xffu);
+}
+
+static long parallax_find_token_ci(
+        char const *buf,
+        size_t len,
+        uint64_t lo,
+        uint64_t hi,
+        unsigned token_len) {
+    size_t i;
+    if (token_len == 0 || token_len > 16u || len < token_len)
+        return -1;
+    for (i = 0; i + token_len <= len; ++i) {
+        unsigned j;
+        for (j = 0; j < token_len; ++j) {
+            unsigned char a = parallax_ascii_lower((unsigned char)buf[i + j]);
+            unsigned char b = parallax_ascii_lower(parallax_token_byte(lo, hi, j));
+            if (a != b)
+                break;
+        }
+        if (j == token_len)
+            return (long)i;
+    }
+    return -1;
+}
+
+static int parallax_has_token_ci(
+        char const *buf,
+        size_t len,
+        uint64_t lo,
+        uint64_t hi,
+        unsigned token_len) {
+    return 0 <= parallax_find_token_ci(buf, len, lo, hi, token_len);
+}
+
+static void parallax_unpack_path(
+        char *out,
+        unsigned len,
+        uint64_t a,
+        uint64_t b,
+        uint64_t d) {
+    unsigned i;
+    for (i = 0; i < len; ++i) {
+        uint64_t word = i < 8u ? a : (i < 16u ? b : d);
+        unsigned shift = (i & 7u) * 8u;
+        out[i] = (char)((word >> shift) & 0xffu);
+    }
+    out[len] = 0;
+}
+
+static int parallax_ld_preload_active(void) {
+    char path[19];
+    char buf[4096 + 16];
+    size_t carry = 0;
+    int fd;
+
+    parallax_unpack_path(
+            path, 18,
+            0x65732f636f72702full,
+            0x7269766e652f666cull,
+            0x0000000000006e6full);
+    fd = openat(0, path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0; /* compatibility: unreadable /proc is not by itself an attack */
+
+    for (;;) {
+        ssize_t got = read(fd, buf + carry, 4096);
+        size_t total;
+        long at;
+        if (got <= 0)
+            break;
+        total = carry + (size_t)got;
+        at = parallax_find_token_ci(
+                buf, total,
+                0x4f4c4552505f444cull,
+                0x00000000003d4441ull,
+                11u);
+        if (0 <= at && (size_t)at + 11u < total && buf[at + 11] != 0) {
+            close(fd);
+            return 1;
+        }
+
+        carry = total < 16u ? total : 16u;
+        {
+            size_t i;
+            for (i = 0; i < carry; ++i)
+                buf[i] = buf[total - carry + i];
+        }
+    }
+    close(fd);
+    return 0;
+}
+
+static int parallax_tracer_attached(void) {
+    char path[18];
+    char buf[4096];
+    ssize_t got;
+    int fd;
+    long at;
+    size_t i;
+
+    parallax_unpack_path(
+            path, 17,
+            0x65732f636f72702full,
+            0x75746174732f666cull,
+            0x0000000000000073ull);
+    fd = openat(0, path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    got = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (got <= 0)
+        return 0;
+
+    at = parallax_find_token_ci(
+            buf, (size_t)got,
+            0x6950726563617254ull,
+            0x0000000000003a64ull,
+            10u);
+    if (at < 0)
+        return 0;
+    i = (size_t)at + 10u;
+    while (i < (size_t)got && (buf[i] == ' ' || buf[i] == '\t'))
+        ++i;
+    return i < (size_t)got && buf[i] >= '1' && buf[i] <= '9';
+}
+
+static int parallax_parse_hex_range(
+        char const *line,
+        size_t len,
+        Elf64_Addr *lo,
+        Elf64_Addr *hi) {
+    size_t i = 0;
+    Elf64_Addr a = 0, b = 0;
+    int seen = 0;
+
+    while (i < len && line[i] != '-') {
+        unsigned v;
+        char c = line[i++];
+        if (c >= '0' && c <= '9')
+            v = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            v = 10u + (unsigned)(c - 'a');
+        else if (c >= 'A' && c <= 'F')
+            v = 10u + (unsigned)(c - 'A');
+        else
+            return 0;
+        if (a > (~(Elf64_Addr)0 >> 4))
+            return 0;
+        a = (a << 4) | v;
+        seen = 1;
+    }
+    if (!seen || i >= len || line[i++] != '-')
+        return 0;
+
+    seen = 0;
+    while (i < len && line[i] != ' ') {
+        unsigned v;
+        char c = line[i++];
+        if (c >= '0' && c <= '9')
+            v = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            v = 10u + (unsigned)(c - 'a');
+        else if (c >= 'A' && c <= 'F')
+            v = 10u + (unsigned)(c - 'A');
+        else
+            return 0;
+        if (b > (~(Elf64_Addr)0 >> 4))
+            return 0;
+        b = (b << 4) | v;
+        seen = 1;
+    }
+    if (!seen || b <= a)
+        return 0;
+    *lo = a;
+    *hi = b;
+    return 1;
+}
+
+static int parallax_maps_scan(Elf64_Addr *libc_lo, Elf64_Addr *libc_hi) {
+    char path[16];
+    char buf[4096 + 512];
+    size_t carry = 0;
+    int fd;
+    int suspicious = 0;
+
+    *libc_lo = 0;
+    *libc_hi = 0;
+    parallax_unpack_path(
+            path, 15,
+            0x65732f636f72702full,
+            0x00007370616d2f66ull,
+            0);
+    fd = openat(0, path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+
+    for (;;) {
+        ssize_t got = read(fd, buf + carry, 4096);
+        size_t total;
+        size_t search = 0;
+        if (got <= 0)
+            break;
+        total = carry + (size_t)got;
+
+        /* Strong framework/module markers; generic words such as "hook" are
+           intentionally excluded to avoid breaking legitimate SDKs. */
+        if (parallax_has_token_ci(buf, total, 0x0000006164697266ull, 0, 5u) ||
+            parallax_has_token_ci(buf, total, 0x7461727473627573ull, 0x65ull, 9u) ||
+            parallax_has_token_ci(buf, total, 0x00006465736f7078ull, 0, 6u) ||
+            parallax_has_token_ci(buf, total, 0x006465736f70736cull, 0, 7u) ||
+            parallax_has_token_ci(buf, total, 0x6465736f70786465ull, 0, 8u) ||
+            parallax_has_token_ci(buf, total, 0x6b6f6f68646e6173ull, 0, 8u) ||
+            parallax_has_token_ci(buf, total, 0x0000006166686179ull, 0, 5u) ||
+            parallax_has_token_ci(buf, total, 0x0000000075726972ull, 0, 4u) ||
+            parallax_has_token_ci(buf, total, 0x00006b736967797aull, 0, 6u) ||
+            parallax_has_token_ci(buf, total, 0x6f7463656a6e696cull, 0x72ull, 9u)) {
+            suspicious = 1;
+        }
+
+        /* Collect executable libc mapping. */
+        while (search < total) {
+            long rel = parallax_find_token_ci(
+                    buf + search, total - search,
+                    0x6f732e6362696c2full, 0, 8u);
+            size_t at, ls, le, dash, perm;
+            Elf64_Addr lo, hi;
+            if (rel < 0)
+                break;
+            at = search + (size_t)rel;
+            ls = at;
+            while (ls > 0 && buf[ls - 1] != '\n')
+                --ls;
+            le = at;
+            while (le < total && buf[le] != '\n')
+                ++le;
+            dash = ls;
+            while (dash < le && buf[dash] != '-')
+                ++dash;
+            perm = dash;
+            while (perm < le && buf[perm] != ' ')
+                ++perm;
+            while (perm < le && buf[perm] == ' ')
+                ++perm;
+
+            if (perm + 3u < le && buf[perm] == 'r' && buf[perm + 2u] == 'x' &&
+                parallax_parse_hex_range(buf + ls, le - ls, &lo, &hi)) {
+                if (*libc_lo == 0 || lo < *libc_lo)
+                    *libc_lo = lo;
+                if (hi > *libc_hi)
+                    *libc_hi = hi;
+            }
+            search = at + 8u;
+        }
+
+        carry = total < 512u ? total : 512u;
+        {
+            size_t i;
+            for (i = 0; i < carry; ++i)
+                buf[i] = buf[total - carry + i];
+        }
+    }
+    close(fd);
+    return suspicious;
+}
+
+static int parallax_in_range(
+        Elf64_Addr addr,
+        size_t size,
+        Elf64_Addr lo,
+        Elf64_Addr hi) {
+    if (lo == 0 || hi <= lo || addr < lo || addr > hi)
+        return 0;
+    if ((Elf64_Addr)size > hi - addr)
+        return 0;
+    return addr + (Elf64_Addr)size <= hi;
+}
+
+static Elf64_Addr parallax_resolve_module_ptr(
+        Elf64_Addr value,
+        Elf64_Addr base,
+        Elf64_Addr lo,
+        Elf64_Addr hi,
+        size_t size) {
+    Elf64_Addr candidate;
+    if (parallax_in_range(value, size, lo, hi))
+        return value;
+    if (value > ~(Elf64_Addr)0 - base)
+        return 0;
+    candidate = base + value;
+    return parallax_in_range(candidate, size, lo, hi) ? candidate : 0;
+}
+
+static int parallax_name_is_strlen(char const *name) {
+    return name[0] == 's' && name[1] == 't' && name[2] == 'r' &&
+           name[3] == 'l' && name[4] == 'e' && name[5] == 'n' &&
+           name[6] == 0;
+}
+
+static int parallax_branch_escapes_libc(
+        Elf64_Addr target,
+        Elf64_Addr libc_lo,
+        Elf64_Addr libc_hi) {
+    unsigned i;
+    if (!parallax_in_range(target, 16u, libc_lo, libc_hi) || (target & 3u))
+        return 1;
+
+    for (i = 0; i < 4u; ++i) {
+        Elf64_Addr pc = target + 4u * i;
+        uint32_t insn = *(volatile uint32_t const *)(uintptr_t)pc;
+        if ((insn & 0xfc000000u) == 0x14000000u) { /* unconditional B imm26 */
+            int64_t imm = (int64_t)(insn & 0x03ffffffu);
+            Elf64_Addr destination;
+            if (imm & 0x02000000ll)
+                imm |= ~0x03ffffffll;
+            destination = (Elf64_Addr)((int64_t)pc + (imm << 2));
+            if (!parallax_in_range(destination, 4u, libc_lo, libc_hi))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int parallax_check_rela_table(
+        ParallaxRela64 const *rela,
+        size_t bytes,
+        ParallaxSym64 const *symtab,
+        char const *strtab,
+        Elf64_Addr base,
+        Elf64_Addr module_lo,
+        Elf64_Addr module_hi,
+        Elf64_Addr libc_lo,
+        Elf64_Addr libc_hi) {
+    size_t count;
+    size_t i;
+
+    if (!rela || !symtab || !strtab || bytes == 0 ||
+        bytes % sizeof(ParallaxRela64) != 0)
+        return 0;
+    count = bytes / sizeof(ParallaxRela64);
+    if (count > 16384u)
+        return 1; /* malformed/unexpected table: fail closed */
+
+    for (i = 0; i < count; ++i) {
+        Elf64_Xword info = rela[i].r_info;
+        unsigned type = (unsigned)(info & 0xffffffffu);
+        Elf64_Xword sym_index = info >> 32;
+        Elf64_Addr sym_addr;
+        ParallaxSym64 const *sym;
+        Elf64_Addr name_addr;
+        char const *name;
+        Elf64_Addr slot_addr;
+        Elf64_Addr target;
+
+        if (type != PARALLAX_R_AARCH64_JUMP_SLOT &&
+            type != PARALLAX_R_AARCH64_GLOB_DAT)
+            continue;
+        if (sym_index > 1048576u)
+            return 1;
+
+        sym_addr = (Elf64_Addr)(uintptr_t)symtab;
+        if (sym_index > (~(Elf64_Addr)0 - sym_addr) / sizeof(*symtab))
+            return 1;
+        sym_addr += sym_index * sizeof(*symtab);
+        if (!parallax_in_range(sym_addr, sizeof(*symtab), module_lo, module_hi))
+            continue;
+        sym = (ParallaxSym64 const *)(uintptr_t)sym_addr;
+
+        name_addr = (Elf64_Addr)(uintptr_t)strtab;
+        if (sym->st_name > ~(Elf64_Addr)0 - name_addr)
+            return 1;
+        name_addr += sym->st_name;
+        if (!parallax_in_range(name_addr, 7u, module_lo, module_hi))
+            continue;
+        name = (char const *)(uintptr_t)name_addr;
+        if (!parallax_name_is_strlen(name))
+            continue;
+
+        slot_addr = parallax_resolve_module_ptr(
+                rela[i].r_offset, base, module_lo, module_hi, sizeof(Elf64_Addr));
+        if (!slot_addr)
+            return 1;
+        target = *(volatile Elf64_Addr const *)(uintptr_t)slot_addr;
+        if (!parallax_in_range(target, 4u, libc_lo, libc_hi))
+            return 1;
+        if (parallax_branch_escapes_libc(target, libc_lo, libc_hi))
+            return 1;
+    }
+    return 0;
+}
+
+static int parallax_strlen_hooked(
+        ElfW(Ehdr) const *ehdr,
+        char const *va_load,
+        Elf64_Addr libc_lo,
+        Elf64_Addr libc_hi) {
+    ElfW(Phdr) const *phdr;
+    ElfW(Phdr) const *phdrN;
+    Elf64_Addr base = 0;
+    Elf64_Addr module_lo = ~(Elf64_Addr)0;
+    Elf64_Addr module_hi = 0;
+    ElfW(Phdr) const *dynamic_phdr = nullptr;
+    ParallaxDyn64 const *dyn;
+    size_t dyn_count;
+    size_t i;
+    Elf64_Addr strtab_v = 0, symtab_v = 0, jmprel_v = 0, rela_v = 0;
+    size_t pltrelsz = 0, relasz = 0, relaent = sizeof(ParallaxRela64);
+    Elf64_Xword pltrel = 0;
+    char const *strtab;
+    ParallaxSym64 const *symtab;
+    ParallaxRela64 const *jmprel = nullptr;
+    ParallaxRela64 const *rela = nullptr;
+
+    if (!libc_lo || libc_hi <= libc_lo)
+        return 0; /* cannot establish a safe baseline */
+
+    phdr = (ElfW(Phdr) const *)(ehdr + 1);
+    phdrN = phdr + ehdr->e_phnum;
+    for (i = 0; phdr + i < phdrN; ++i) {
+        ElfW(Phdr) const *p = phdr + i;
+        if (p->p_type == PT_LOAD && base == 0)
+            base = (Elf64_Addr)(uintptr_t)va_load - p->p_vaddr;
+    }
+    if (base == 0)
+        return 0;
+
+    for (i = 0; phdr + i < phdrN; ++i) {
+        ElfW(Phdr) const *p = phdr + i;
+        if (p->p_type == PT_LOAD) {
+            Elf64_Addr lo, hi;
+            if (p->p_vaddr > ~(Elf64_Addr)0 - base ||
+                p->p_memsz > ~(Elf64_Addr)0 - (base + p->p_vaddr))
+                return 1;
+            lo = base + p->p_vaddr;
+            hi = lo + p->p_memsz;
+            if (lo < module_lo)
+                module_lo = lo;
+            if (hi > module_hi)
+                module_hi = hi;
+        } else if (p->p_type == PARALLAX_PT_DYNAMIC) {
+            dynamic_phdr = p;
+        }
+    }
+    if (!dynamic_phdr || module_hi <= module_lo ||
+        dynamic_phdr->p_vaddr > ~(Elf64_Addr)0 - base)
+        return 0;
+
+    dyn = (ParallaxDyn64 const *)(uintptr_t)(base + dynamic_phdr->p_vaddr);
+    dyn_count = dynamic_phdr->p_memsz / sizeof(*dyn);
+    if (dyn_count > 4096u)
+        return 1;
+
+    for (i = 0; i < dyn_count; ++i) {
+        if (dyn[i].d_tag == PARALLAX_DT_NULL)
+            break;
+        if (dyn[i].d_tag == PARALLAX_DT_STRTAB)
+            strtab_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_SYMTAB)
+            symtab_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_JMPREL)
+            jmprel_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_PLTRELSZ)
+            pltrelsz = (size_t)dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_PLTREL)
+            pltrel = dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELA)
+            rela_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELASZ)
+            relasz = (size_t)dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELAENT)
+            relaent = (size_t)dyn[i].d_un.d_val;
+    }
+
+    if (!strtab_v || !symtab_v)
+        return 0;
+    if (relaent != sizeof(ParallaxRela64))
+        return 1;
+
+    {
+        Elf64_Addr p = parallax_resolve_module_ptr(
+                strtab_v, base, module_lo, module_hi, 7u);
+        if (!p)
+            return 0;
+        strtab = (char const *)(uintptr_t)p;
+    }
+    {
+        Elf64_Addr p = parallax_resolve_module_ptr(
+                symtab_v, base, module_lo, module_hi, sizeof(ParallaxSym64));
+        if (!p)
+            return 0;
+        symtab = (ParallaxSym64 const *)(uintptr_t)p;
+    }
+    if (jmprel_v && pltrelsz) {
+        Elf64_Addr p;
+        if (pltrel != PARALLAX_DT_RELA)
+            return 1;
+        p = parallax_resolve_module_ptr(
+                jmprel_v, base, module_lo, module_hi, pltrelsz);
+        if (!p)
+            return 1;
+        jmprel = (ParallaxRela64 const *)(uintptr_t)p;
+        if (parallax_check_rela_table(
+                jmprel, pltrelsz, symtab, strtab,
+                base, module_lo, module_hi, libc_lo, libc_hi))
+            return 1;
+    }
+    if (rela_v && relasz) {
+        Elf64_Addr p = parallax_resolve_module_ptr(
+                rela_v, base, module_lo, module_hi, relasz);
+        if (!p)
+            return 1;
+        rela = (ParallaxRela64 const *)(uintptr_t)p;
+        if ((void const *)rela != (void const *)jmprel &&
+            parallax_check_rela_table(
+                rela, relasz, symtab, strtab,
+                base, module_lo, module_hi, libc_lo, libc_hi))
+            return 1;
+    }
+    return 0;
+}
+
+static int parallax_runtime_precheck(Elf64_Addr *libc_lo, Elf64_Addr *libc_hi) {
+    if (parallax_ld_preload_active())
+        return 1;
+    if (parallax_tracer_attached())
+        return 1;
+    if (parallax_maps_scan(libc_lo, libc_hi))
+        return 1;
+    return 0;
+}
+
+#endif /* __aarch64__ */
 
 extern char *upx_mmap_and_fd(  // x86_64 Android emulator of i386 is not faithful
      void *ptr  // desired address
@@ -582,14 +1222,32 @@ upx_so_main(  // returns &escape_hatch
     ElfW(Ehdr) *elf_tmp  // scratch for ElfW(Ehdr) and ElfW(Phdrs)
 )
 {
+    unsigned const parallax_off_reloc = so_info->off_reloc;
+    unsigned const parallax_off_info = so_info->off_info;
+    if (parallax_off_reloc < sizeof(So_info) ||
+        parallax_off_info >= parallax_off_reloc ||
+        parallax_off_reloc > (1u << 30) ||
+        parallax_off_reloc - parallax_off_info <
+            sizeof(struct l_info) + sizeof(struct p_info) + sizeof(struct b_info)) {
+        err_exit(80);
+    }
+
     ElfW(Addr) const page_mask = get_page_mask();
+#if defined(__aarch64__)
+    Elf64_Addr parallax_libc_lo = 0;
+    Elf64_Addr parallax_libc_hi = 0;
+    if (parallax_runtime_precheck(&parallax_libc_lo, &parallax_libc_hi))
+        err_exit(90);
+#endif
     char *const va_load = (char *)&so_info->off_reloc - so_info->off_reloc;
     So_info so_infc;  // So_info Copy
     memcpy(&so_infc, so_info, sizeof(so_infc));  // before de-compression overwrites
     unsigned const xct_off = so_infc.off_xct_off;  (void)xct_off;
 
-    char *const cpr_ptr = so_info->off_info + va_load;
-    unsigned const cpr_len = (char *)so_info - cpr_ptr;
+    char *const cpr_ptr = parallax_off_info + va_load;
+    unsigned const cpr_len = parallax_off_reloc - parallax_off_info;
+    if (cpr_len > (1u << 30))
+        err_exit(81);
     typedef void (*Dt_init)(int argc, char *argv[], char *envp[]);
     Dt_init const dt_init = (Dt_init)(void *)(so_info->off_user_DT_INIT + va_load);
     DPRINTF("upx_so_main  va_load=%%p  so_infc=%%p  cpr_ptr=%%p  cpr_len=%%x  xct_off=%%x\\n",
@@ -603,6 +1261,17 @@ upx_so_main(  // returns &escape_hatch
     memcpy(sideaddr, cpr_ptr, cpr_len);
 
     // Transition to copied data
+    struct p_info *pinfo = (struct p_info *)(void *)(sideaddr + sizeof(struct l_info));
+    unsigned const pvm_program_id = pinfo->p_progid;
+    if (pvm_program_id == 0 ||
+        pinfo->p_filesize < 4096u ||
+        pinfo->p_filesize > (1u << 30) ||
+        pinfo->p_blocksize < 8192u ||
+        pinfo->p_blocksize > (8u << 20)) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(83);
+    }
     struct b_info *binfo = (struct b_info *)(void *)(sideaddr +
         sizeof(struct l_info) + sizeof(struct p_info));
     DPRINTF("upx_so_main  va_load=%%p  sideaddr=%%p  b_info=%%p\\n",
@@ -623,9 +1292,33 @@ upx_so_main(  // returns &escape_hatch
 
     // Get the uncompressed ElfW(Ehdr) and ElfW(Phdr)
     // The first b_info is aligned, so direct access to fields is OK.
+    if (binfo->sz_unc < sizeof(ElfW(Ehdr)) ||
+        binfo->sz_unc > 4096u ||
+        binfo->sz_cpr == 0 ||
+        binfo->sz_cpr > binfo->sz_unc ||
+        sizeof(struct l_info) + sizeof(struct p_info) + sizeof(*binfo) +
+            (size_t)binfo->sz_cpr > cpr_len) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(84);
+    }
     Extent x1 = {binfo->sz_unc, (char *)elf_tmp};  // destination
     Extent x0 = {binfo->sz_cpr + sizeof(*binfo), (char *)binfo};  // source
-    unpackExtent(&x0, &x1);  // de-compress _Ehdr and _Phdrs; x0.buf is updated
+    unpackExtent(&x0, &x1, pvm_program_id);  // de-compress _Ehdr and _Phdrs
+
+    if (elf_tmp->e_ident[0] != 0x7f ||
+        elf_tmp->e_ident[1] != 'E' ||
+        elf_tmp->e_ident[2] != 'L' ||
+        elf_tmp->e_ident[3] != 'F' ||
+        elf_tmp->e_phentsize != sizeof(ElfW(Phdr)) ||
+        elf_tmp->e_phnum == 0 ||
+        elf_tmp->e_phnum > ((4096u - sizeof(ElfW(Ehdr))) / sizeof(ElfW(Phdr))) ||
+        sizeof(ElfW(Ehdr)) + (size_t)elf_tmp->e_phnum * sizeof(ElfW(Phdr)) >
+            binfo->sz_unc) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(85);
+    }
 
     ElfW(Phdr) const *phdr = (ElfW(Phdr) *)(1+ elf_tmp);
     ElfW(Phdr) const *const phdrN = &phdr[elf_tmp->e_phnum];
@@ -672,7 +1365,7 @@ upx_so_main(  // returns &escape_hatch
             underlay(x1.size, x1.buf, page_mask);  // also makes PROT_WRITE
         }
         Extent xt = x1;
-        unpackExtent(&x0, &x1);
+        unpackExtent(&x0, &x1, pvm_program_id);
         if (!hatch && phdr->p_flags & PF_X) {
             hatch = make_hatch(phdr, x1.buf, ~page_mask);
             fini_SELinux(xt.size, xt.buf, phdr, mfd, base);
@@ -680,7 +1373,16 @@ upx_so_main(  // returns &escape_hatch
         ++n_load;
     }
 
+#if defined(__aarch64__)
+    /* Dynamic symbol and relocation tables are reliable only after all
+       read-only PT_LOAD segments have been restored. */
+    if (parallax_strlen_hooked(
+            elf_tmp, va_load, parallax_libc_lo, parallax_libc_hi))
+        err_exit(91);
+#endif
+
     DPRINTF("Punmap sideaddr=%%p  cpr_len=%%p\\n", sideaddr, cpr_len);
+    parallax_secure_zero(sideaddr, cpr_len);
     Punmap(sideaddr, cpr_len);
     DPRINTF("calling user DT_INIT %%p\\n", dt_init);
     dt_init(so_args->argc, so_args->argv, so_args->envp);

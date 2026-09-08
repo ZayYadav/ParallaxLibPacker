@@ -1,5 +1,7 @@
 # Android endpoint hardening
 
+> **Parallax Ultra note:** the runtime protector documented in the repository root is fully client-side and does not require this endpoint-signing example. A PVM4-protected library may continue calling its own APIs/servers normally. This directory is optional application-layer hardening for projects that already use a server and want signed endpoint configuration.
+
 For signed and encrypted library distribution and the new `keygen`, `seal`,
 `verify`, and `restore` commands, see [SECURE-PACKAGES.md](../SECURE-PACKAGES.md).
 These packages require restoration before normal library loading.
