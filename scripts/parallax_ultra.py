@@ -9,7 +9,6 @@ atomic output, optional size equalization, and signed provenance.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -154,6 +153,32 @@ def write_new(path: Path, data: bytes, mode: int = 0o600) -> None:
         raise
 
 
+def publish_new_file(source: Path, destination: Path) -> None:
+    """Publish source without ever replacing an existing destination."""
+    if destination.exists() or destination.is_symlink():
+        raise UltraError(f"destination already exists: {destination}")
+    try:
+        if os.name == "nt":
+            # Windows rename fails rather than replacing an existing destination.
+            os.rename(source, destination)
+        else:
+            # POSIX rename replaces an existing path, so use same-filesystem
+            # hard-link publication with O_EXCL-like no-clobber semantics.
+            os.link(source, destination, follow_symlinks=False)
+            source.unlink()
+    except FileExistsError as exc:
+        raise UltraError(f"destination already exists: {destination}") from exc
+
+
+def ensure_private_key_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise UltraError("signing key must be a regular non-symlink file")
+    if os.name == "posix":
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            raise UltraError("signing key permissions must not grant group/other access")
+
+
 def keygen(directory: Path) -> None:
     directory.mkdir(mode=0o700, parents=False, exist_ok=False)
     private = Ed25519PrivateKey.generate()
@@ -234,6 +259,8 @@ def protect(args: argparse.Namespace) -> None:
     output = Path(args.output).absolute()
     packer = Path(args.packer).resolve(strict=True)
     signing_key = None if args.unsigned_dev else Path(args.signing_key).resolve(strict=True)
+    if signing_key is not None:
+        ensure_private_key_file(signing_key)
 
     if output.exists() or output.is_symlink():
         raise UltraError("output already exists")
@@ -263,9 +290,6 @@ def protect(args: argparse.Namespace) -> None:
         protected_sha = sha256_file(temp)
         if protected_sha == source_sha:
             raise UltraError("protected output is byte-identical to input")
-
-        # Atomic publish into a path that was required not to exist.
-        os.rename(temp, output)
 
         manifest = {
             "schema": SCHEMA,
@@ -303,12 +327,29 @@ def protect(args: argparse.Namespace) -> None:
             + "\n"
         ).encode("utf-8")
         manifest_path = output.with_suffix(output.suffix + ".pvm.json")
-        write_new(manifest_path, manifest_bytes)
+        sig_path = output.with_suffix(output.suffix + ".pvm.sig")
+        signature = sign_manifest(manifest_bytes, signing_key) if signing_key is not None else None
 
-        if signing_key is not None:
-            signature = sign_manifest(manifest_bytes, signing_key)
-            sig_path = output.with_suffix(output.suffix + ".pvm.sig")
-            write_new(sig_path, signature)
+        # Publish metadata first and the protected artifact last. Consumers can
+        # treat the artifact path as the transaction-complete marker.
+        published = []
+        try:
+            write_new(manifest_path, manifest_bytes)
+            published.append(manifest_path)
+            if signature is not None:
+                write_new(sig_path, signature)
+                published.append(sig_path)
+            publish_new_file(temp, output)
+            published.append(output)
+        except BaseException:
+            for published_path in reversed(published):
+                try:
+                    published_path.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+
+        if signature is not None:
             print(f"Signed manifest: {sig_path}")
         else:
             print("WARNING: unsigned development mode; provenance is not authenticated")
@@ -333,6 +374,8 @@ def verify(args: argparse.Namespace) -> None:
     if len(manifest_bytes) > 1024 * 1024:
         raise UltraError("manifest too large")
     manifest = json.loads(manifest_bytes)
+    if not isinstance(manifest, dict):
+        raise UltraError("manifest root must be an object")
     if manifest.get("schema") != SCHEMA or manifest.get("profile") != PROFILE:
         raise UltraError("unsupported protection manifest")
 
