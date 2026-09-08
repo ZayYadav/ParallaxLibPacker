@@ -18,6 +18,8 @@ if [[ ! -f "$ARCHIVE" ]]; then
   curl --fail --location --retry 3 --proto '=https' --tlsv1.2     "$STUBTOOLS_URL" -o "$ARCHIVE"
 fi
 
+echo "509e06639118a79d8e79489a400e134c6d3ca36bad2c6ec29648d7c1e5b81afa  $ARCHIVE" | sha256sum -c -
+
 # Old UPX cross compiler needs libmpfr.so.4. The CI workflow installs libmpfr6;
 # use the compatibility symlink recommended by upstream for stub rebuilding.
 if [[ ! -e /usr/lib/x86_64-linux-gnu/libmpfr.so.4 && -e /usr/lib/x86_64-linux-gnu/libmpfr.so.6 ]]; then
