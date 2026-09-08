@@ -31,6 +31,7 @@
 
 
 #include "include/linux.h"
+#include "../../parallax_vm4.h"
 
 // Pprotect is mprotect, but page-aligned on the lo end (Linux requirement)
 extern unsigned Pprotect(void *, size_t, unsigned);
@@ -176,7 +177,8 @@ int f_expand( // .globl in $(ARCH)-linux.elf-so_fold.S
 static void
 unpackExtent(
     Extent *const xi,  // input includes struct b_info
-    Extent *const xo   // output
+    Extent *const xo,  // output
+    unsigned const pvm_program_id
 )
 {
     while (xo->size) {
@@ -205,6 +207,36 @@ ERR_LAB
         ||  h.sz_unc > xo->size ) {
             err_exit(5);
         }
+
+#if defined(__aarch64__)
+        /*
+         * PVM4 is opt-in per block via b_unused. The disk copy remains in
+         * diversified form; only the block currently being consumed is
+         * decoded inside the already-private side buffer.
+         */
+        if (parallax_vm4_is_tag(h.b_unused)) {
+            if (pvm_program_id == 0 || h.sz_cpr == 0) {
+                err_exit(9);
+            }
+            parallax_vm4_decode(
+                    (unsigned char *)xi->buf,
+                    h.sz_cpr,
+                    pvm_program_id,
+                    h.sz_unc,
+                    h.sz_cpr,
+                    h.b_method,
+                    h.b_unused);
+
+            /*
+             * f_expand() receives the b_info immediately before xi->buf.
+             * Clear only the private copy's transport marker so legacy
+             * decompressor code never interprets it as compression metadata.
+             */
+            ((struct b_info *)(void *)(xi->buf - sizeof(h)))->b_unused = 0;
+        }
+#else
+        (void)pvm_program_id;
+#endif
         // Now we have:
         //   assert(h.sz_cpr <= h.sz_unc);
         //   assert(h.sz_unc > 0 && h.sz_unc <= blocksize);
@@ -603,6 +635,8 @@ upx_so_main(  // returns &escape_hatch
     memcpy(sideaddr, cpr_ptr, cpr_len);
 
     // Transition to copied data
+    struct p_info *pinfo = (struct p_info *)(void *)(sideaddr + sizeof(struct l_info));
+    unsigned const pvm_program_id = pinfo->p_progid;
     struct b_info *binfo = (struct b_info *)(void *)(sideaddr +
         sizeof(struct l_info) + sizeof(struct p_info));
     DPRINTF("upx_so_main  va_load=%%p  sideaddr=%%p  b_info=%%p\\n",
@@ -625,7 +659,7 @@ upx_so_main(  // returns &escape_hatch
     // The first b_info is aligned, so direct access to fields is OK.
     Extent x1 = {binfo->sz_unc, (char *)elf_tmp};  // destination
     Extent x0 = {binfo->sz_cpr + sizeof(*binfo), (char *)binfo};  // source
-    unpackExtent(&x0, &x1);  // de-compress _Ehdr and _Phdrs; x0.buf is updated
+    unpackExtent(&x0, &x1, pvm_program_id);  // de-compress _Ehdr and _Phdrs
 
     ElfW(Phdr) const *phdr = (ElfW(Phdr) *)(1+ elf_tmp);
     ElfW(Phdr) const *const phdrN = &phdr[elf_tmp->e_phnum];
@@ -672,7 +706,7 @@ upx_so_main(  // returns &escape_hatch
             underlay(x1.size, x1.buf, page_mask);  // also makes PROT_WRITE
         }
         Extent xt = x1;
-        unpackExtent(&x0, &x1);
+        unpackExtent(&x0, &x1, pvm_program_id);
         if (!hatch && phdr->p_flags & PF_X) {
             hatch = make_hatch(phdr, x1.buf, ~page_mask);
             fini_SELinux(xt.size, xt.buf, phdr, mfd, base);
