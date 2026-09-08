@@ -825,17 +825,22 @@ static int parallax_strlen_hooked(
     for (i = 0; i < dyn_count; ++i) {
         if (dyn[i].d_tag == PARALLAX_DT_NULL)
             break;
-        switch ((long)dyn[i].d_tag) {
-        case PARALLAX_DT_STRTAB: strtab_v = dyn[i].d_un.d_ptr; break;
-        case PARALLAX_DT_SYMTAB: symtab_v = dyn[i].d_un.d_ptr; break;
-        case PARALLAX_DT_JMPREL: jmprel_v = dyn[i].d_un.d_ptr; break;
-        case PARALLAX_DT_PLTRELSZ: pltrelsz = (size_t)dyn[i].d_un.d_val; break;
-        case PARALLAX_DT_PLTREL: pltrel = dyn[i].d_un.d_val; break;
-        case PARALLAX_DT_RELA: rela_v = dyn[i].d_un.d_ptr; break;
-        case PARALLAX_DT_RELASZ: relasz = (size_t)dyn[i].d_un.d_val; break;
-        case PARALLAX_DT_RELAENT: relaent = (size_t)dyn[i].d_un.d_val; break;
-        default: break;
-        }
+        if (dyn[i].d_tag == PARALLAX_DT_STRTAB)
+            strtab_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_SYMTAB)
+            symtab_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_JMPREL)
+            jmprel_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_PLTRELSZ)
+            pltrelsz = (size_t)dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_PLTREL)
+            pltrel = dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELA)
+            rela_v = dyn[i].d_un.d_ptr;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELASZ)
+            relasz = (size_t)dyn[i].d_un.d_val;
+        else if (dyn[i].d_tag == PARALLAX_DT_RELAENT)
+            relaent = (size_t)dyn[i].d_un.d_val;
     }
 
     if (!strtab_v || !symtab_v)
