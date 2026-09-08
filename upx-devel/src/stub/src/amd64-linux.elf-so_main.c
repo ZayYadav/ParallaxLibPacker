@@ -149,6 +149,14 @@ typedef struct {
 
 
 static void
+parallax_secure_zero(void *address, size_t length)
+{
+    volatile unsigned char *p = (volatile unsigned char *)address;
+    while (length-- != 0)
+        *p++ = 0;
+}
+
+static void
 xread(Extent *x, char *buf, size_t count)
 {
     DPRINTF("xread x.size=%%x  x.buf=%%p  buf=%%p  count=%%x\\n",
@@ -209,6 +217,8 @@ ERR_LAB
         }
 
 #if defined(__aarch64__)
+        unsigned char *const pvm_block_start = (unsigned char *)xi->buf;
+        size_t const pvm_block_size = h.sz_cpr;
         /*
          * PVM4 is opt-in per block via b_unused. The disk copy remains in
          * diversified form; only the block currently being consumed is
@@ -250,6 +260,9 @@ ERR_LAB
                 DPRINTF("  j=%%x  out_len=%%x  &h=%%p\\n", j, out_len, &h);
                 err_exit(7);
             }
+#if defined(__aarch64__)
+            parallax_secure_zero(pvm_block_start, pvm_block_size);
+#endif
             xi->buf  += h.sz_cpr;
             xi->size -= h.sz_cpr;
         }
@@ -715,6 +728,7 @@ upx_so_main(  // returns &escape_hatch
     }
 
     DPRINTF("Punmap sideaddr=%%p  cpr_len=%%p\\n", sideaddr, cpr_len);
+    parallax_secure_zero(sideaddr, cpr_len);
     Punmap(sideaddr, cpr_len);
     DPRINTF("calling user DT_INIT %%p\\n", dt_init);
     dt_init(so_args->argc, so_args->argv, so_args->envp);
