@@ -252,6 +252,63 @@ static bool set_method(int m, int l) {
     return true;
 }
 
+static void enforce_parallax_ultra_profile() {
+    if (!opt->o_unix.parallax_ultra_lib)
+        return;
+
+    if (opt->cmd != CMD_COMPRESS) {
+        fprintf(stderr,
+                "%s: --parallax-ultra-lib is protection-only and cannot be combined "
+                "with list/test/info commands\n",
+                argv0);
+        e_usage();
+    }
+
+    // Re-lock the security profile after environment and all CLI options have
+    // been parsed. This prevents UPX environment options or later arguments
+    // from weakening the Ultra configuration.
+    opt->cmd = CMD_COMPRESS;
+    opt->method = M_LZMA;
+    opt->level = 10;
+    opt->filter = FT_NONE;
+    opt->ultra_brute = false;
+    opt->all_methods = false;
+    opt->all_methods_use_lzma = 1;
+    opt->all_filters = false;
+    opt->no_filter = false;
+    opt->prefer_ucl = false;
+    opt->exact = false;
+    opt->small = 0;
+
+    opt->backup = 0;
+    opt->force = 0;
+    opt->force_overwrite = false;
+    opt->info_mode = 0;
+    opt->no_env = true;
+    opt->overlay = opt->COPY_OVERLAY;
+    opt->to_stdout = false;
+
+    opt->debug.debug_level = 0;
+    opt->debug.disable_random_id = false;
+    opt->debug.dump_stub_loader = nullptr;
+    opt->debug.fake_stub_version[0] = 0;
+    opt->debug.fake_stub_year[0] = 0;
+    opt->debug.use_random_method = false;
+    opt->debug.use_random_filter = false;
+
+    opt->o_unix.blocksize = 0;
+    opt->o_unix.force_execve = false;
+    opt->o_unix.is_ptinterp = false;
+    opt->o_unix.use_ptinterp = false;
+    opt->o_unix.make_ptinterp = false;
+    opt->o_unix.unmap_all_pages = false;
+    opt->o_unix.preserve_build_id = false;
+    opt->o_unix.android_shlib = true;
+    opt->o_unix.android_old = false;
+    opt->o_unix.force_pie = false;
+    opt->o_unix.catch_sigsegv = false;
+}
+
 static void set_output_name(const char *n, bool allow_m) {
 #if 1
     if (opt->output_name) {
@@ -741,6 +798,7 @@ static noinline int do_option(int optc, const char *arg) {
         break;
     case 920: // --parallax-ultra-lib
         opt->o_unix.android_shlib = true;
+        opt->o_unix.parallax_ultra_lib = true;
         opt->no_env = true;
         opt->backup = 0;
         opt->all_methods_use_lzma = 1;
@@ -1322,8 +1380,13 @@ int upx_main(int argc, char *argv[]) may_throw {
     if (argc == 1)
         e_help();
     set_term(stderr);
+    enforce_parallax_ultra_profile();
     check_and_update_options(i, argc);
     int num_files = argc - i;
+    if (opt->o_unix.parallax_ultra_lib && num_files != 1) {
+        fprintf(stderr, "%s: --parallax-ultra-lib requires exactly one input file\n", argv0);
+        e_usage();
+    }
     if (num_files < 1) {
         if (opt->verbose >= 2)
             e_help();
