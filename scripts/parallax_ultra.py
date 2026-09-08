@@ -213,7 +213,16 @@ def run_packer(packer: Path, source: Path, output: Path) -> None:
         str(output),
         str(source),
     ]
-    proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    clean_env = os.environ.copy()
+    for name in ("PARALLAX", "UPX", "UPX_OPTIONS"):
+        clean_env.pop(name, None)
+    proc = subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=clean_env,
+    )
     if proc.returncode != 0:
         raise UltraError("native packer failed:\n" + proc.stdout[-8000:])
     if not output.is_file() or output.stat().st_size <= 0:
