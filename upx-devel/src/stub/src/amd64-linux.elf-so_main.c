@@ -219,6 +219,9 @@ ERR_LAB
 #if defined(__aarch64__)
         unsigned char *const pvm_block_start = (unsigned char *)xi->buf;
         size_t const pvm_block_size = h.sz_cpr;
+        if (pvm_program_id != 0 && !parallax_vm4_is_tag(h.b_unused)) {
+            err_exit(9);
+        }
         /*
          * PVM4 is opt-in per block via b_unused. The disk copy remains in
          * diversified form; only the block currently being consumed is
@@ -1219,6 +1222,16 @@ upx_so_main(  // returns &escape_hatch
     ElfW(Ehdr) *elf_tmp  // scratch for ElfW(Ehdr) and ElfW(Phdrs)
 )
 {
+    unsigned const parallax_off_reloc = so_info->off_reloc;
+    unsigned const parallax_off_info = so_info->off_info;
+    if (parallax_off_reloc < sizeof(So_info) ||
+        parallax_off_info >= parallax_off_reloc ||
+        parallax_off_reloc > (1u << 30) ||
+        parallax_off_reloc - parallax_off_info <
+            sizeof(struct l_info) + sizeof(struct p_info) + sizeof(struct b_info)) {
+        err_exit(80);
+    }
+
     ElfW(Addr) const page_mask = get_page_mask();
 #if defined(__aarch64__)
     Elf64_Addr parallax_libc_lo = 0;
@@ -1231,8 +1244,10 @@ upx_so_main(  // returns &escape_hatch
     memcpy(&so_infc, so_info, sizeof(so_infc));  // before de-compression overwrites
     unsigned const xct_off = so_infc.off_xct_off;  (void)xct_off;
 
-    char *const cpr_ptr = so_info->off_info + va_load;
-    unsigned const cpr_len = (char *)so_info - cpr_ptr;
+    char *const cpr_ptr = parallax_off_info + va_load;
+    unsigned const cpr_len = parallax_off_reloc - parallax_off_info;
+    if (cpr_len > (1u << 30))
+        err_exit(81);
     typedef void (*Dt_init)(int argc, char *argv[], char *envp[]);
     Dt_init const dt_init = (Dt_init)(void *)(so_info->off_user_DT_INIT + va_load);
     DPRINTF("upx_so_main  va_load=%%p  so_infc=%%p  cpr_ptr=%%p  cpr_len=%%x  xct_off=%%x\\n",
@@ -1248,6 +1263,15 @@ upx_so_main(  // returns &escape_hatch
     // Transition to copied data
     struct p_info *pinfo = (struct p_info *)(void *)(sideaddr + sizeof(struct l_info));
     unsigned const pvm_program_id = pinfo->p_progid;
+    if (pvm_program_id == 0 ||
+        pinfo->p_filesize < 4096u ||
+        pinfo->p_filesize > (1u << 30) ||
+        pinfo->p_blocksize < 8192u ||
+        pinfo->p_blocksize > (8u << 20)) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(83);
+    }
     struct b_info *binfo = (struct b_info *)(void *)(sideaddr +
         sizeof(struct l_info) + sizeof(struct p_info));
     DPRINTF("upx_so_main  va_load=%%p  sideaddr=%%p  b_info=%%p\\n",
@@ -1268,9 +1292,33 @@ upx_so_main(  // returns &escape_hatch
 
     // Get the uncompressed ElfW(Ehdr) and ElfW(Phdr)
     // The first b_info is aligned, so direct access to fields is OK.
+    if (binfo->sz_unc < sizeof(ElfW(Ehdr)) ||
+        binfo->sz_unc > 4096u ||
+        binfo->sz_cpr == 0 ||
+        binfo->sz_cpr > binfo->sz_unc ||
+        sizeof(struct l_info) + sizeof(struct p_info) + sizeof(*binfo) +
+            (size_t)binfo->sz_cpr > cpr_len) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(84);
+    }
     Extent x1 = {binfo->sz_unc, (char *)elf_tmp};  // destination
     Extent x0 = {binfo->sz_cpr + sizeof(*binfo), (char *)binfo};  // source
     unpackExtent(&x0, &x1, pvm_program_id);  // de-compress _Ehdr and _Phdrs
+
+    if (elf_tmp->e_ident[0] != 0x7f ||
+        elf_tmp->e_ident[1] != 'E' ||
+        elf_tmp->e_ident[2] != 'L' ||
+        elf_tmp->e_ident[3] != 'F' ||
+        elf_tmp->e_phentsize != sizeof(ElfW(Phdr)) ||
+        elf_tmp->e_phnum == 0 ||
+        elf_tmp->e_phnum > ((4096u - sizeof(ElfW(Ehdr))) / sizeof(ElfW(Phdr))) ||
+        sizeof(ElfW(Ehdr)) + (size_t)elf_tmp->e_phnum * sizeof(ElfW(Phdr)) >
+            binfo->sz_unc) {
+        parallax_secure_zero(sideaddr, cpr_len);
+        Punmap(sideaddr, cpr_len);
+        err_exit(85);
+    }
 
     ElfW(Phdr) const *phdr = (ElfW(Phdr) *)(1+ elf_tmp);
     ElfW(Phdr) const *const phdrN = &phdr[elf_tmp->e_phnum];
