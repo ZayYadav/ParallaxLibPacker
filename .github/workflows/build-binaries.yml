@@ -121,10 +121,22 @@ jobs:
           readelf -d /tmp/libparallax_sample.so | grep -q 'BIND_NOW'
           aarch64-linux-gnu-readelf -Ws /tmp/libparallax_sample.so | grep -q ' strlen@'
 
-          rm -f /tmp/libparallax_sample.protected.so
-          build-linux/upx --parallax-ultra-lib             -o /tmp/libparallax_sample.protected.so             /tmp/libparallax_sample.so
+          rm -f /tmp/libparallax_sample.protected.so /tmp/libparallax_sample.protected2.so
+
+          # Hostile inherited options and later weak CLI switches must not
+          # downgrade the centrally locked Ultra profile.
+          PARALLAX='--disable-random-id --no-lzma --overlay=strip --small' \
+            build-linux/upx --parallax-ultra-lib --no-lzma --overlay=strip               -o /tmp/libparallax_sample.protected.so               /tmp/libparallax_sample.so
+
+          PARALLAX='--disable-random-id --no-lzma' \
+            build-linux/upx --parallax-ultra-lib               -o /tmp/libparallax_sample.protected2.so               /tmp/libparallax_sample.so
 
           test -s /tmp/libparallax_sample.protected.so
+          test -s /tmp/libparallax_sample.protected2.so
+          if cmp -s /tmp/libparallax_sample.protected.so /tmp/libparallax_sample.protected2.so; then
+            echo "ERROR: independent Ultra protection runs were byte-identical"
+            exit 1
+          fi
           readelf -h /tmp/libparallax_sample.protected.so | grep -q 'AArch64'
 
           if readelf -lW /tmp/libparallax_sample.protected.so | grep -E 'LOAD.*RWE' >/dev/null; then
