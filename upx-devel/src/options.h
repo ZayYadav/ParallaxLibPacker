@@ -160,6 +160,7 @@ struct Options final {
         unsigned char osabi0;   // replacement if 0==.e_ident[EI_OSABI]
         bool preserve_build_id; // copy the build-id to the compressed binary
         bool android_shlib;     // keep some ElfXX_Shdr for dlopen()
+        bool parallax_ultra_lib; // lock hardened Android ARM64 PVM4 profile
         bool android_old;       // < Android_10 ==> no memfd_create, inconsistent __NR_ftruncate
         bool force_pie;         // choose DF_1_PIE instead of is_shlib
         bool catch_sigsegv;     // to debug hardware or de-compressor
