@@ -8,6 +8,13 @@ on:
     paths:
       - "upx-devel/**"
       - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/build-binaries.yml"
+  pull_request:
+    paths:
+      - "upx-devel/**"
+      - "scripts/**"
+      - "tests/**"
       - ".github/workflows/build-binaries.yml"
 
 permissions:
@@ -23,12 +30,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build tools
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils cmake ninja-build git file
+          sudo apt-get install -y \
+            build-essential binutils cmake ninja-build git file curl xz-utils perl python3 \
+            libc6:i386 zlib1g:i386 libmpfr6
 
       - name: Download required vendor dependencies
         shell: bash
@@ -36,16 +46,33 @@ jobs:
           set -euo pipefail
           mkdir -p "$SOURCE_DIR/vendor"
           clone_vendor() {
-            local repo="$1" dst="$2"
-            if [ ! -d "$SOURCE_DIR/vendor/$dst/.git" ]; then
-              git clone --depth 1 --branch upx-vendor "https://github.com/upx/$repo.git" "$SOURCE_DIR/vendor/$dst"
-            fi
+            local repo="$1" dst="$2" sha="$3"
+            local dir="$SOURCE_DIR/vendor/$dst"
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/upx/$repo.git"
+            git -C "$dir" fetch -q --depth 1 origin "$sha"
+            git -C "$dir" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
           }
-          clone_vendor upx-vendor-doctest doctest
-          clone_vendor upx-vendor-lzma-sdk lzma-sdk
-          clone_vendor upx-vendor-ucl ucl
-          clone_vendor upx-vendor-valgrind valgrind
-          clone_vendor upx-vendor-zlib zlib
+          clone_vendor upx-vendor-doctest doctest 835aaee34666173532e98437b057f37b385076c9
+          clone_vendor upx-vendor-lzma-sdk lzma-sdk f9637f9f563d17b6ecf33ae2212dcd44866bfb25
+          clone_vendor upx-vendor-ucl ucl a60611d342b0b7d2924c495ebaa1910e4c3c3fe6
+          clone_vendor upx-vendor-valgrind valgrind b054e44ea1b6d630853ed74d33e0934ef4642efc
+          clone_vendor upx-vendor-zlib zlib 0a41a7d0a974d0b43afe4afe4b8025c8f144474e
+
+      - name: Test PVM4 core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
+          /tmp/pvm4-roundtrip
+
+      - name: Regenerate hardened ARM64 ELF-SO runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rebuild-pvm4-arm64-stub.sh "$SOURCE_DIR"
 
       - name: Configure full-size static Linux build
         shell: bash
@@ -129,7 +156,7 @@ jobs:
           sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Linux binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parallax_linux
           path: |
@@ -144,10 +171,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install x64 MinGW cross compiler
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y \
             gcc-mingw-w64-x86-64-posix \
@@ -159,7 +187,12 @@ jobs:
             git \
             file \
             curl \
-            xz-utils
+            xz-utils \
+            perl \
+            python3 \
+            libc6:i386 \
+            zlib1g:i386 \
+            libmpfr6
 
       - name: Download required vendor dependencies
         shell: bash
@@ -167,16 +200,33 @@ jobs:
           set -euo pipefail
           mkdir -p "$SOURCE_DIR/vendor"
           clone_vendor() {
-            local repo="$1" dst="$2"
-            if [ ! -d "$SOURCE_DIR/vendor/$dst/.git" ]; then
-              git clone --depth 1 --branch upx-vendor "https://github.com/upx/$repo.git" "$SOURCE_DIR/vendor/$dst"
-            fi
+            local repo="$1" dst="$2" sha="$3"
+            local dir="$SOURCE_DIR/vendor/$dst"
+            rm -rf "$dir"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/upx/$repo.git"
+            git -C "$dir" fetch -q --depth 1 origin "$sha"
+            git -C "$dir" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
           }
-          clone_vendor upx-vendor-doctest doctest
-          clone_vendor upx-vendor-lzma-sdk lzma-sdk
-          clone_vendor upx-vendor-ucl ucl
-          clone_vendor upx-vendor-valgrind valgrind
-          clone_vendor upx-vendor-zlib zlib
+          clone_vendor upx-vendor-doctest doctest 835aaee34666173532e98437b057f37b385076c9
+          clone_vendor upx-vendor-lzma-sdk lzma-sdk f9637f9f563d17b6ecf33ae2212dcd44866bfb25
+          clone_vendor upx-vendor-ucl ucl a60611d342b0b7d2924c495ebaa1910e4c3c3fe6
+          clone_vendor upx-vendor-valgrind valgrind b054e44ea1b6d630853ed74d33e0934ef4642efc
+          clone_vendor upx-vendor-zlib zlib 0a41a7d0a974d0b43afe4afe4b8025c8f144474e
+
+      - name: Test PVM4 core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
+          /tmp/pvm4-roundtrip
+
+      - name: Regenerate hardened ARM64 ELF-SO runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rebuild-pvm4-arm64-stub.sh "$SOURCE_DIR"
 
       - name: Download official UPX 5.2.1 host compressor
         shell: bash
@@ -186,6 +236,7 @@ jobs:
           curl -fL --retry 3 \
             -o /tmp/upx.tar.xz \
             "https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-amd64_linux.tar.xz"
+          echo "402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657  /tmp/upx.tar.xz" | sha256sum -c -
           tar -xJf /tmp/upx.tar.xz -C official-upx --strip-components=1
           chmod +x official-upx/upx
           official-upx/upx --version
@@ -271,7 +322,7 @@ jobs:
           sha256sum -c "${FINAL}.sha256"
 
       - name: Upload Windows binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ParallaxLibPacker-Windows-x64
           path: |
