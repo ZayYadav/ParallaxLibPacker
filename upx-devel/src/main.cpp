@@ -132,6 +132,12 @@ static noreturn void e_optarg(const char *n) {
     e_exit(EXIT_USAGE);
 }
 
+static noreturn void e_disabled(const char *n) {
+    fflush(con_term);
+    fprintf(stderr, "%s: command '%s' is disabled in the hardened Parallax build\n", argv0, n);
+    e_exit(EXIT_USAGE);
+}
+
 static noreturn void e_optval(const char *n) {
     fflush(con_term);
     fprintf(stderr, "%s: invalid value for option '%s'\n", argv0, n);
@@ -359,7 +365,7 @@ static noinline int do_option(int optc, const char *arg) {
         break;
 #endif
     case 'd':
-        set_cmd(CMD_DECOMPRESS);
+        e_disabled("decompress");
         break;
     case 'D':
         opt->debug.debug_level++;
@@ -730,7 +736,18 @@ static noinline int do_option(int optc, const char *arg) {
         opt->o_unix.preserve_build_id = true;
         break;
     case 676:
+        // Legacy internal selector; no public long option maps here.
         opt->o_unix.android_shlib = true;
+        break;
+    case 920: // --parallax-ultra-lib
+        opt->o_unix.android_shlib = true;
+        opt->no_env = true;
+        opt->backup = 0;
+        opt->all_methods_use_lzma = 1;
+        if (!set_method(M_LZMA, -1))
+            e_method(M_LZMA, 10);
+        if (!set_method(-1, 10))
+            e_method(opt->method, 10);
         break;
     case 677:
         opt->o_unix.force_pie = true;
@@ -821,7 +838,6 @@ int main_get_options(int argc, char **argv) {
         {"best", 0x10, N, 900},        // compress best
         {"brute", 0x10, N, 901},       // compress best, brute force
         {"ultra-brute", 0x10, N, 902}, // compress best, ultra-brute force
-        {"decompress", 0, N, 'd'},     // decompress
         {"fast", 0x10, N, '1'},        // compress faster
         {"fileinfo", 0x10, N, 909},    // display info about file
         {"file-info", 0x10, N, 909},   // display info about file
@@ -831,7 +847,6 @@ int main_get_options(int argc, char **argv) {
         {"sysinfo", 0x90, N, 910},     // display system info // undocumented and subject to change
         {"sys-info", 0x90, N, 910},    // display system info // undocumented and subject to change
         {"test", 0, N, 't'},           // test compressed file integrity
-        {"uncompress", 0, N, 'd'},     // decompress
         {"version", 0, N, 'V' + 256},  // display version number
 
         // options
@@ -856,7 +871,8 @@ int main_get_options(int argc, char **argv) {
 #endif
         {"verbose", 0, N, 'v'}, // verbose mode
 
-        // debug options
+        // Debug-only switches are unavailable in release builds.
+#if DEBUG
         {"debug", 0x10, N, 'D'},
         {"dump-stub-loader", 0x31, N, 544},        // for internal debugging
         {"fake-stub-version", 0x31, N, 542},       // for internal debugging
@@ -864,6 +880,7 @@ int main_get_options(int argc, char **argv) {
         {"disable-random-id", 0x90, N, 545},       // for internal debugging
         {"debug-use-random-method", 0x90, N, 546}, // for internal debugging / fuzz testing
         {"debug-use-random-filter", 0x90, N, 547}, // for internal debugging / fuzz testing
+#endif
 
         // backup options
         {"backup", 0x10, N, 'k'},
@@ -952,7 +969,7 @@ int main_get_options(int argc, char **argv) {
         {"openbsd", 0x10, N, 669},
         {"unmap-all-pages", 0x10, N, 674}, // linux /proc/self/exe vanishes
         {"preserve-build-id", 0, N, 675},
-        {"android-shlib", 0, N, 676},
+        {"parallax-ultra-lib", 0, N, 920},
         {"force-pie", 0x90, N, 677},
         {"android-old", 0, N, 678},
         {"catch-sigsegv", 0, N, 679},
