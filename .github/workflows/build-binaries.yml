@@ -39,6 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential binutils cmake ninja-build git file curl xz-utils perl python3 \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             libc6:i386 zlib1g:i386 libmpfr6
 
       - name: Download required vendor dependencies
@@ -96,6 +97,55 @@ jobs:
 
       - name: Build Linux
         run: cmake --build build-linux --config Release --parallel
+
+      - name: Protect real ARM64 strlen sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/parallax-sample.c <<'EOF'
+          #include <stddef.h>
+          #include <string.h>
+
+          __attribute__((visibility("default")))
+          size_t parallax_sample_strlen(const char *s) {
+              return strlen(s);
+          }
+
+          __attribute__((visibility("default"), used, section(".rodata.parallax")))
+          const unsigned char parallax_sample_blob[1048576] = { 0x50, 0x56, 0x4d, 0x34 };
+          EOF
+
+          aarch64-linux-gnu-gcc -fPIC -shared -O2             -Wl,-z,relro,-z,now,-z,noexecstack             -o /tmp/libparallax_sample.so /tmp/parallax-sample.c
+
+          readelf -h /tmp/libparallax_sample.so | grep -q 'AArch64'
+          readelf -d /tmp/libparallax_sample.so | grep -q 'BIND_NOW'
+          aarch64-linux-gnu-readelf -Ws /tmp/libparallax_sample.so | grep -q ' strlen@'
+
+          rm -f /tmp/libparallax_sample.protected.so
+          build-linux/upx --parallax-ultra-lib             -o /tmp/libparallax_sample.protected.so             /tmp/libparallax_sample.so
+
+          test -s /tmp/libparallax_sample.protected.so
+          readelf -h /tmp/libparallax_sample.protected.so | grep -q 'AArch64'
+
+          if readelf -lW /tmp/libparallax_sample.protected.so | grep -E 'LOAD.*RWE' >/dev/null; then
+            echo "ERROR: protected sample contains RWX PT_LOAD"
+            exit 1
+          fi
+
+          if readelf -lW /tmp/libparallax_sample.protected.so | grep GNU_STACK | grep -q 'RWE'; then
+            echo "ERROR: protected sample has executable stack"
+            exit 1
+          fi
+
+          if build-linux/upx -d /tmp/libparallax_sample.protected.so                -o /tmp/should-not-restore.so >/tmp/unpack.log 2>&1; then
+            echo "ERROR: public decompression unexpectedly restored protected library"
+            cat /tmp/unpack.log
+            exit 1
+          fi
+          test ! -e /tmp/should-not-restore.so
+
+          sha256sum /tmp/libparallax_sample.so /tmp/libparallax_sample.protected.so
+          echo "ARM64 PVM4 protection regression: PASS"
 
       - name: Validate Linux image
         shell: bash
