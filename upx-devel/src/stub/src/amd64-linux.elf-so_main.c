@@ -641,7 +641,7 @@ static int parallax_in_range(
         size_t size,
         Elf64_Addr lo,
         Elf64_Addr hi) {
-    if (lo == 0 || hi <= lo || addr < lo)
+    if (lo == 0 || hi <= lo || addr < lo || addr > hi)
         return 0;
     if ((Elf64_Addr)size > hi - addr)
         return 0;
@@ -1270,12 +1270,6 @@ upx_so_main(  // returns &escape_hatch
     ElfW(Phdr) const *phdr = (ElfW(Phdr) *)(1+ elf_tmp);
     ElfW(Phdr) const *const phdrN = &phdr[elf_tmp->e_phnum];
 
-#if defined(__aarch64__)
-    if (parallax_strlen_hooked(
-            elf_tmp, va_load, parallax_libc_lo, parallax_libc_hi))
-        err_exit(91);
-#endif
-
     // Process each read-only PT_LOAD.
     // A read+write PT_LOAD might be relocated by rtld before de-compression,
     // so it cannot be compressed.
@@ -1325,6 +1319,14 @@ upx_so_main(  // returns &escape_hatch
         }
         ++n_load;
     }
+
+#if defined(__aarch64__)
+    /* Dynamic symbol and relocation tables are reliable only after all
+       read-only PT_LOAD segments have been restored. */
+    if (parallax_strlen_hooked(
+            elf_tmp, va_load, parallax_libc_lo, parallax_libc_hi))
+        err_exit(91);
+#endif
 
     DPRINTF("Punmap sideaddr=%%p  cpr_len=%%p\\n", sideaddr, cpr_len);
     parallax_secure_zero(sideaddr, cpr_len);
