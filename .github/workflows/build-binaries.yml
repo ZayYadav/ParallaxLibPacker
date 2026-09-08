@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - ultra-multivm-hardening
     paths:
       - "upx-devel/**"
       - "scripts/**"
