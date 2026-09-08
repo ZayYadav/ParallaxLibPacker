@@ -41,6 +41,7 @@
 #include "p_unix.h"
 #include "p_lx_exc.h"
 #include "p_lx_elf.h"
+#include "parallax_vm4.h"
 #include "ui.h"
 
 // NOLINTBEGIN(clang-analyzer-core.CallAndMessage)
