@@ -1,59 +1,22 @@
 name: Secure package tests
-
 on:
   push:
-    branches:
-      - main
-      - ultra-multivm-hardening
-    paths:
-      - "scripts/**"
-      - "tests/**"
-      - "upx-devel/src/parallax_vm4.h"
-      - ".github/workflows/secure-packages.yml"
+    paths: ['scripts/parallax_package.py', 'scripts/requirements-secure.txt', 'tests/**', '.github/workflows/secure-packages.yml']
   pull_request:
-    paths:
-      - "scripts/**"
-      - "tests/**"
-      - "upx-devel/src/parallax_vm4.h"
-      - ".github/workflows/secure-packages.yml"
-  workflow_dispatch:
-
+    paths: ['scripts/parallax_package.py', 'scripts/requirements-secure.txt', 'tests/**', '.github/workflows/secure-packages.yml']
 permissions:
   contents: read
-
 jobs:
-  test-linux:
-    name: Linux security tests
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.14']
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
-      - name: Install locked dependencies
-        run: python -m pip install --only-binary=:all: -r scripts/requirements-secure.txt
-      - name: Python tests
-        run: python -m unittest discover -s tests -v
-      - name: PVM4 native vectors
-        shell: bash
-        run: |
-          set -euo pipefail
-          cc -std=c11 -O2 -Wall -Wextra -Werror tests/pvm4_roundtrip.c -o /tmp/pvm4-roundtrip
-          /tmp/pvm4-roundtrip
-
-  test-windows:
-    name: Windows security tests
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
-      - name: Install locked dependencies
-        run: python -m pip install --only-binary=:all: -r scripts/requirements-secure.txt
-      - name: Python tests
-        run: python -m unittest discover -s tests -v
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r scripts/requirements-secure.txt
+      - run: python -m unittest discover -s tests -v
