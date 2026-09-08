@@ -98,7 +98,7 @@ void show_header() {
     fg = con_fg(f, FG_GREEN);
     // clang-format off
     con_fprintf(f,
-                "                       Parallax Packer for eXecutables\n"
+                "                       Parallax Ultra Library Protector\n"
                 "                          Copyright (C) 1996 - " UPX_VERSION_YEAR "\n"
 #if defined(UPX_VERSION_GITREV)
                 "Parallax git-%6.6s%c"
@@ -125,7 +125,7 @@ void show_header() {
 void show_usage() {
     FILE *f = con_term;
 
-    con_fprintf(f, "Usage: %s [-123456789dlthVL] [-qvfk] [-o file] %sfile..\n", progname,
+    con_fprintf(f, "Usage: %s --parallax-ultra-lib [-o file] %sfile..\n", progname,
 #if (ACC_OS_DOS32) && defined(__DJGPP__)
                 "[@]");
 #else
@@ -277,8 +277,8 @@ void show_help(int verbose) {
     con_fprintf(f,
                 "  -1     compress faster                   -9    compress better\n"
                 "%s"
-                "  -d     decompress                        -l    list compressed file\n"
-                "  -t     test compressed file              -V    display version number\n"
+                "  --parallax-ultra-lib  protect Android ARM64 shared library\n"
+                "  -l     list protected file               -V    display version number\n"
                 "%s"
                 "  -h     give %s help                    -L    display software license\n%s",
                 verbose == 0 ? "" : "  --best compress best (can be slow for big files)\n",
